@@ -258,6 +258,50 @@ RDP_PROTOCOLS = {
 QUIC_INITIAL_SALT_V1 = bytes.fromhex("38762cf7f55934b34d179ae6a4c80cadccbb7f0a")
 QUIC_INITIAL_SALT_V2 = bytes.fromhex("0dede3def700a6db819381be6e269dcbf9bd2ed9")
 
+ZRTP_MSG_TYPES = {
+    "Hello   ": "Hello",     "HelloACK": "HelloACK",
+    "Commit  ": "Commit",    "DHPart1 ": "DHPart1",
+    "DHPart2 ": "DHPart2",   "Confirm1": "Confirm1",
+    "Confirm2": "Confirm2",  "Conf2ACK": "Conf2ACK",
+    "Error   ": "Error",     "GoClear ": "GoClear",
+    "SASrelay": "SASrelay",  "Ping    ": "Ping",
+    "PingACK ": "PingACK",
+}
+
+ZRTP_KEY_AGREEMENT = {
+    "DH3K": "DH-3072 (classical)",  "DH2K": "DH-2048 (classical)",
+    "EC25": "ECDH-P-256 (classical)", "EC38": "ECDH-P-384 (classical)",
+    "EC52": "ECDH-P-521 (classical)", "Prsh": "preshared",
+    "Mult": "multistream",
+}
+
+BGP_MSG_TYPES = {
+    1: "OPEN", 2: "UPDATE", 3: "NOTIFICATION", 4: "KEEPALIVE", 5: "ROUTE-REFRESH",
+}
+
+OPC_UA_MSG_TYPES = {
+    b"HEL": "Hello",         b"ACK": "Acknowledge",
+    b"OPN": "OpenSecureChannel", b"CLO": "CloseSecureChannel",
+    b"MSG": "Message",       b"ERR": "Error",
+}
+
+OPC_UA_SECURITY_MODES = {1: "None", 2: "Sign", 3: "SignAndEncrypt"}
+
+# Non-standard ports for heuristic TLS detection
+TLS_HEURISTIC_PORTS = {
+    8443, 8444, 9443, 4433, 4434, 4444,   # HTTPS alternates
+    2376, 2377,                             # Docker daemon
+    6443,                                   # Kubernetes API server
+    10250, 10255,                           # Kubelet
+    2379, 2380,                             # etcd
+    9200, 9300,                             # Elasticsearch
+    27017,                                  # MongoDB
+    6380,                                   # Redis TLS (convention)
+    9090, 9091, 9093, 9094,                 # Prometheus / Alertmanager
+    8080, 8081, 8888, 8889,                 # Generic app servers
+    5000, 5001,                             # Docker registry / Flask
+}
+
 # ---------------------------------------------------------------------------
 # Module-level parsing helpers
 # ---------------------------------------------------------------------------
@@ -513,6 +557,119 @@ def _extract_quic_tls_hello(frames):
     if assembled[0] == 0x01:  # ClientHello
         return assembled
     return None
+
+
+def _parse_tls_extensions_raw(data, pos, end):
+    """Parse TLS extensions from a ClientHello/ServerHello body."""
+    result = {}
+    ext_names = []
+    server_name = None
+    supported_groups = []
+    supported_versions = []
+    alpn_protocols = []
+
+    while pos + 4 <= min(end, len(data)):
+        ext_type = struct.unpack(">H", data[pos:pos + 2])[0]
+        ext_dlen = struct.unpack(">H", data[pos + 2:pos + 4])[0]
+        ext_data = data[pos + 4:pos + 4 + ext_dlen]
+        ext_names.append(TLS_EXTENSIONS.get(ext_type, f"unknown_{ext_type}"))
+
+        if ext_type == 0 and len(ext_data) >= 5:  # SNI
+            nlen = struct.unpack(">H", ext_data[3:5])[0]
+            server_name = ext_data[5:5 + nlen].decode("utf-8", errors="ignore")
+
+        elif ext_type == 10 and len(ext_data) >= 2:  # supported_groups
+            gl = struct.unpack(">H", ext_data[0:2])[0]
+            for gi in range(2, 2 + gl, 2):
+                if gi + 2 <= len(ext_data):
+                    gid = struct.unpack(">H", ext_data[gi:gi + 2])[0]
+                    supported_groups.append(TLS_NAMED_GROUPS.get(gid, f"group_0x{gid:04x}"))
+
+        elif ext_type == 43 and ext_data:  # supported_versions
+            if ext_data[0] % 2 == 0 and len(ext_data) > 1:  # ClientHello: length + list
+                for vi in range(1, ext_data[0] + 1, 2):
+                    if vi + 2 <= len(ext_data):
+                        ver = struct.unpack(">H", ext_data[vi:vi + 2])[0]
+                        supported_versions.append(TLS_VERSIONS.get(ver, f"0x{ver:04x}"))
+            elif len(ext_data) >= 2:  # ServerHello: single value
+                ver = struct.unpack(">H", ext_data[0:2])[0]
+                supported_versions.append(TLS_VERSIONS.get(ver, f"0x{ver:04x}"))
+
+        elif ext_type == 16 and len(ext_data) >= 2:  # ALPN
+            off = 2
+            while off < len(ext_data):
+                plen = ext_data[off]; off += 1
+                if off + plen <= len(ext_data):
+                    alpn_protocols.append(ext_data[off:off + plen].decode("utf-8", errors="ignore"))
+                off += plen
+
+        pos += 4 + ext_dlen
+
+    result["extensions"] = ext_names
+    if server_name:        result["server_name"] = server_name
+    if supported_groups:   result["supported_groups"] = supported_groups
+    if supported_versions: result["supported_versions"] = supported_versions
+    if alpn_protocols:     result["alpn_protocols"] = alpn_protocols
+    return result
+
+
+def _parse_tls_hello_raw(data):
+    """
+    Parse a TLS ClientHello or ServerHello from raw bytes without scapy.
+    data must start at the TLS record header (0x16 0x03 ...).
+    Returns a dict of parsed fields, or None if not a recognisable hello.
+    """
+    if len(data) < 9:
+        return None
+    if data[0] != 0x16 or data[1] != 0x03 or data[2] not in (0x00, 0x01, 0x02, 0x03, 0x04):
+        return None
+    record_version = (data[1] << 8) | data[2]
+    hs_type = data[5]
+    if hs_type not in (0x01, 0x02):
+        return None
+    hs_len = struct.unpack(">I", b"\x00" + data[6:9])[0]
+    body = data[9:9 + hs_len]
+    if len(body) < 34:
+        return None
+
+    result = {
+        "hs_type": "ClientHello" if hs_type == 0x01 else "ServerHello",
+        "record_version": TLS_VERSIONS.get(record_version, f"0x{record_version:04x}"),
+    }
+    pos = 34  # skip legacy_version (2) + random (32)
+
+    if hs_type == 0x01:  # ClientHello
+        if pos >= len(body): return result
+        sid_len = body[pos]; pos += 1 + sid_len
+        if pos + 2 > len(body): return result
+        cs_len = struct.unpack(">H", body[pos:pos + 2])[0]; pos += 2
+        ciphers = []
+        for i in range(0, cs_len, 2):
+            if pos + i + 2 <= len(body):
+                cs = struct.unpack(">H", body[pos + i:pos + i + 2])[0]
+                ciphers.append({"name": TLS_CIPHER_SUITES.get(cs, f"UNKNOWN_0x{cs:04x}"),
+                                "value": f"0x{cs:04x}"})
+        result["client_cipher_suites"] = ciphers
+        result["cipher_count"] = len(ciphers)
+        pos += cs_len
+        if pos < len(body): comp_len = body[pos]; pos += 1 + comp_len
+        if pos + 2 <= len(body):
+            ext_len = struct.unpack(">H", body[pos:pos + 2])[0]; pos += 2
+            result.update(_parse_tls_extensions_raw(body, pos, pos + ext_len))
+
+    elif hs_type == 0x02:  # ServerHello
+        if pos >= len(body): return result
+        sid_len = body[pos]; pos += 1 + sid_len
+        if pos + 3 > len(body): return result
+        cs = struct.unpack(">H", body[pos:pos + 2])[0]
+        result["selected_cipher"] = {"name": TLS_CIPHER_SUITES.get(cs, f"UNKNOWN_0x{cs:04x}"),
+                                      "value": f"0x{cs:04x}"}
+        pos += 3
+        if pos + 2 <= len(body):
+            ext_len = struct.unpack(">H", body[pos:pos + 2])[0]; pos += 2
+            result.update(_parse_tls_extensions_raw(body, pos, pos + ext_len))
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1736,6 +1893,272 @@ class CryptoSniffer:
         return info
 
     # -----------------------------------------------------------------------
+    # ZRTP (NEW)
+    # -----------------------------------------------------------------------
+
+    def analyze_zrtp(self, pkt):
+        """Detect ZRTP VoIP end-to-end encryption handshake (RFC 6189)."""
+        if not pkt.haslayer(UDP) or not pkt.haslayer(Raw):
+            return None
+        udp = pkt[UDP]
+        ip = pkt[IP] if pkt.haslayer(IP) else pkt[IPv6]
+        raw = bytes(pkt[Raw].load)
+        if len(raw) < 12:
+            return None
+        # ZRTP: first byte = 0x10, magic cookie "ZRTP" at bytes 4–7
+        if raw[0] != 0x10 or (raw[1] & 0x80):
+            return None
+        if raw[4:8] != b"ZRTP":
+            return None
+
+        seq_no = struct.unpack(">H", raw[1:3])[0] & 0x7fff
+        ssrc   = struct.unpack(">I", raw[8:12])[0]
+
+        msg_label = "Unknown"
+        msg_type_raw = None
+        if len(raw) >= 22:
+            try:
+                mt = raw[14:22].decode("ascii", errors="replace")
+                msg_label = ZRTP_MSG_TYPES.get(mt, mt.strip())
+                msg_type_raw = mt
+            except Exception:
+                pass
+
+        conn_id = f"{ip.src}:{udp.sport} -> {ip.dst}:{udp.dport}"
+        info = {
+            "protocol": "ZRTP",
+            "type": f"ZRTP {msg_label}",
+            "timestamp": datetime.now().isoformat(),
+            "src_ip": ip.src, "src_port": udp.sport,
+            "dst_ip": ip.dst, "dst_port": udp.dport,
+            "connection": conn_id,
+            "direction": "outbound",
+            "encrypted": True,
+            "zrtp_message": msg_label,
+            "zrtp_ssrc": f"0x{ssrc:08x}",
+            "zrtp_seq": seq_no,
+        }
+
+        # Commit message carries key agreement type
+        # Body layout (after 22-byte header): H2(32) + ZID(12) + hash(4) + cipher(4) + authTag(4) + keyAgree(4) + sas(4)
+        if msg_type_raw and msg_type_raw.startswith("Commit"):
+            ka_offset = 22 + 32 + 12 + 4 + 4 + 4
+            if len(raw) >= ka_offset + 4:
+                try:
+                    ka = raw[ka_offset:ka_offset + 4].decode("ascii", errors="ignore")
+                    info["zrtp_key_agreement"] = ZRTP_KEY_AGREEMENT.get(ka, f"unknown ({ka})")
+                except Exception:
+                    pass
+
+        info["note"] = "ZRTP uses DH/ECDH — no PQ key agreement in any deployed implementation"
+        info["post_quantum_secure"] = "No"
+        return info
+
+    # -----------------------------------------------------------------------
+    # BGP / BGP over TLS (NEW)
+    # -----------------------------------------------------------------------
+
+    def analyze_bgp(self, pkt):
+        """Detect BGP OPEN messages (plain TCP) and BGP over TLS (RFC 9072)."""
+        if not pkt.haslayer(TCP) or not pkt.haslayer(Raw):
+            return None
+        tcp = pkt[TCP]
+        ip = pkt[IP] if pkt.haslayer(IP) else pkt[IPv6]
+        if tcp.dport != 179 and tcp.sport != 179:
+            return None
+        raw = bytes(pkt[Raw].load)
+        if not raw:
+            return None
+
+        conn_id = f"{ip.src}:{tcp.sport} -> {ip.dst}:{tcp.dport}"
+        direction = "outbound" if tcp.dport == 179 else "inbound"
+
+        # BGP over TLS (RFC 9072): TLS handshake on port 179
+        if len(raw) >= 6 and raw[0] == 0x16 and raw[1] == 0x03 and raw[2] in (0x01, 0x02, 0x03, 0x04):
+            parsed = _parse_tls_hello_raw(raw)
+            if parsed:
+                info = {
+                    "protocol": "BGP over TLS",
+                    "type": f"BGP/TLS {parsed['hs_type']}",
+                    "timestamp": datetime.now().isoformat(),
+                    "src_ip": ip.src, "src_port": tcp.sport,
+                    "dst_ip": ip.dst, "dst_port": tcp.dport,
+                    "connection": conn_id,
+                    "direction": direction,
+                    "encrypted": True,
+                    "tls_version": parsed.get("record_version"),
+                    "note": "BGP session protected by TLS (RFC 9072)",
+                }
+                for k in ("client_cipher_suites", "cipher_count", "selected_cipher",
+                          "server_name", "supported_versions", "supported_groups",
+                          "alpn_protocols", "extensions"):
+                    if k in parsed:
+                        info[k] = parsed[k]
+                info["post_quantum_secure"] = self.check_pq_security(info)
+                return info
+            return None
+
+        # Plain BGP: 16-byte all-0xff marker
+        if len(raw) < 19 or raw[0:16] != b"\xff" * 16:
+            return None
+        msg_type = raw[18]
+        if msg_type not in BGP_MSG_TYPES:
+            return None
+
+        info = {
+            "protocol": "BGP",
+            "type": f"BGP {BGP_MSG_TYPES[msg_type]}",
+            "timestamp": datetime.now().isoformat(),
+            "src_ip": ip.src, "src_port": tcp.sport,
+            "dst_ip": ip.dst, "dst_port": tcp.dport,
+            "connection": conn_id,
+            "direction": direction,
+            "encrypted": False,
+            "bgp_message": BGP_MSG_TYPES[msg_type],
+            "note": "Plaintext BGP — consider RFC 9072 (BGP over TLS)",
+        }
+        if msg_type == 1 and len(raw) >= 29:  # OPEN
+            info["bgp_version"]    = raw[19]
+            info["bgp_as"]         = struct.unpack(">H", raw[20:22])[0]
+            info["bgp_hold_time"]  = struct.unpack(">H", raw[22:24])[0]
+            info["bgp_id"]         = ".".join(str(b) for b in raw[24:28])
+        info["post_quantum_secure"] = "No"
+        return info
+
+    # -----------------------------------------------------------------------
+    # OPC-UA / OPC-UA over TLS (NEW)
+    # -----------------------------------------------------------------------
+
+    def analyze_opcua(self, pkt):
+        """Detect OPC-UA binary protocol (port 4840) and OPC-UA over TLS (port 4843)."""
+        if not pkt.haslayer(TCP) or not pkt.haslayer(Raw):
+            return None
+        tcp = pkt[TCP]
+        ip = pkt[IP] if pkt.haslayer(IP) else pkt[IPv6]
+        port = (tcp.dport if tcp.dport in (4840, 4843)
+                else tcp.sport if tcp.sport in (4840, 4843)
+                else None)
+        if port is None:
+            return None
+        raw = bytes(pkt[Raw].load)
+        conn_id = f"{ip.src}:{tcp.sport} -> {ip.dst}:{tcp.dport}"
+        direction = "outbound" if tcp.dport == port else "inbound"
+
+        # OPC-UA over TLS (port 4843)
+        if port == 4843:
+            if len(raw) >= 6 and raw[0] == 0x16 and raw[1] == 0x03 and raw[2] in (0x01, 0x02, 0x03, 0x04):
+                parsed = _parse_tls_hello_raw(raw)
+                if parsed:
+                    info = {
+                        "protocol": "OPC-UA over TLS",
+                        "type": f"OPC-UA/TLS {parsed['hs_type']}",
+                        "timestamp": datetime.now().isoformat(),
+                        "src_ip": ip.src, "src_port": tcp.sport,
+                        "dst_ip": ip.dst, "dst_port": tcp.dport,
+                        "connection": conn_id,
+                        "direction": direction,
+                        "encrypted": True,
+                        "tls_version": parsed.get("record_version"),
+                    }
+                    for k in ("client_cipher_suites", "cipher_count", "selected_cipher",
+                              "server_name", "supported_versions", "supported_groups",
+                              "alpn_protocols", "extensions"):
+                        if k in parsed:
+                            info[k] = parsed[k]
+                    info["post_quantum_secure"] = self.check_pq_security(info)
+                    return info
+            return None
+
+        # Plain OPC-UA binary (port 4840): 3-byte message type + chunk type
+        if len(raw) < 8:
+            return None
+        msg_key = raw[0:3]
+        if msg_key not in OPC_UA_MSG_TYPES:
+            return None
+        chunk = chr(raw[3])
+        if chunk not in ("F", "C", "A"):
+            return None
+
+        info = {
+            "protocol": "OPC-UA",
+            "type": f"OPC-UA {OPC_UA_MSG_TYPES[msg_key]}",
+            "timestamp": datetime.now().isoformat(),
+            "src_ip": ip.src, "src_port": tcp.sport,
+            "dst_ip": ip.dst, "dst_port": tcp.dport,
+            "connection": conn_id,
+            "direction": direction,
+            "encrypted": False,
+            "opcua_message": OPC_UA_MSG_TYPES[msg_key],
+        }
+
+        # OpenSecureChannel: scan payload for security policy URI
+        if msg_key == b"OPN" and len(raw) > 32:
+            prefix = b"http://opcfoundation.org/UA/SecurityPolicy#"
+            idx = raw.find(prefix)
+            if idx != -1:
+                end = min(idx + 200, len(raw))
+                policy = raw[idx:end].split(b"\x00")[0].decode("utf-8", errors="ignore")
+                info["opcua_security_policy"] = policy
+                # Security mode is a uint32 encoded as little-endian somewhere nearby
+                for offset in range(8, 48):
+                    pos = idx + len(policy) + offset
+                    if pos + 4 <= len(raw):
+                        mode = struct.unpack("<I", raw[pos:pos + 4])[0]
+                        if mode in OPC_UA_SECURITY_MODES:
+                            info["opcua_security_mode"] = OPC_UA_SECURITY_MODES[mode]
+                            if mode == 3:
+                                info["encrypted"] = True
+                            break
+
+        if not info.get("opcua_security_policy"):
+            info["note"] = "Plaintext OPC-UA — use port 4843 with TLS for encryption"
+        info["post_quantum_secure"] = "No"
+        return info
+
+    # -----------------------------------------------------------------------
+    # Heuristic TLS on non-standard ports (NEW — must run last)
+    # -----------------------------------------------------------------------
+
+    def analyze_tls_heuristic(self, pkt):
+        """Detect TLS ClientHello/ServerHello on non-standard ports by raw header inspection."""
+        if not pkt.haslayer(TCP) or not pkt.haslayer(Raw):
+            return None
+        tcp = pkt[TCP]
+        port = (tcp.dport if tcp.dport in TLS_HEURISTIC_PORTS
+                else tcp.sport if tcp.sport in TLS_HEURISTIC_PORTS
+                else None)
+        if port is None:
+            return None
+        raw = bytes(pkt[Raw].load)
+        parsed = _parse_tls_hello_raw(raw)
+        if not parsed:
+            return None
+        ip = pkt[IP] if pkt.haslayer(IP) else pkt[IPv6]
+        conn_id = f"{ip.src}:{tcp.sport} -> {ip.dst}:{tcp.dport}"
+        info = {
+            "protocol": "TLS",
+            "type": f"TLS {parsed['hs_type']} (port {port})",
+            "timestamp": datetime.now().isoformat(),
+            "src_ip": ip.src, "src_port": tcp.sport,
+            "dst_ip": ip.dst, "dst_port": tcp.dport,
+            "connection": conn_id,
+            "direction": "outbound" if tcp.dport == port else "inbound",
+            "encrypted": True,
+            "tls_version": parsed.get("record_version", "Unknown"),
+            "heuristic_port": port,
+            "note": f"TLS detected on non-standard port {port}",
+        }
+        for k in ("client_cipher_suites", "cipher_count", "selected_cipher",
+                  "server_name", "supported_versions", "supported_groups",
+                  "alpn_protocols", "extensions"):
+            if k in parsed:
+                info[k] = parsed[k]
+        if "alpn_protocols" in info and "h2" in info["alpn_protocols"]:
+            info["application"] = "gRPC / HTTP2"
+        info["post_quantum_secure"] = self.check_pq_security(info)
+        return info
+
+    # -----------------------------------------------------------------------
     # Dispatcher
     # -----------------------------------------------------------------------
 
@@ -1763,6 +2186,10 @@ class CryptoSniffer:
             self.analyze_radius,
             self.analyze_amqp,
             self.analyze_sip,
+            self.analyze_zrtp,
+            self.analyze_bgp,
+            self.analyze_opcua,
+            self.analyze_tls_heuristic,   # must be last — matches non-standard ports
         ]
 
         info = None
@@ -1898,6 +2325,30 @@ class CryptoSniffer:
         if "sip_status" in info:
             print(f"SIP Status:  {info['sip_status']}")
 
+        # ZRTP
+        if "zrtp_message" in info:
+            print(f"ZRTP Msg:    {info['zrtp_message']}  (SSRC={info.get('zrtp_ssrc', '?')})")
+        if "zrtp_key_agreement" in info:
+            print(f"ZRTP KA:     {info['zrtp_key_agreement']}")
+
+        # BGP
+        if "bgp_message" in info:
+            print(f"BGP Msg:     {info['bgp_message']}")
+        if "bgp_as" in info:
+            print(f"BGP AS:      {info['bgp_as']}  (router-id={info.get('bgp_id', '?')})")
+
+        # OPC-UA
+        if "opcua_message" in info:
+            print(f"OPC-UA Msg:  {info['opcua_message']}")
+        if "opcua_security_policy" in info:
+            print(f"OPC-UA Policy: {info['opcua_security_policy']}")
+        if "opcua_security_mode" in info:
+            print(f"OPC-UA Mode: {info['opcua_security_mode']}")
+
+        # Heuristic TLS
+        if "heuristic_port" in info:
+            print(f"Heuristic:   TLS detected on non-standard port {info['heuristic_port']}")
+
         # DTLS
         if "dtls_version" in info:
             print(f"DTLS:        {info['dtls_version']}")
@@ -1958,6 +2409,25 @@ class CryptoSniffer:
             "udp port 1813",   # RADIUS accounting
             "udp port 53",     # DNS (for DNSSEC)
             "tcp port 53",     # DNS/TCP (for DNSSEC)
+            "tcp port 179",    # BGP / BGP over TLS
+            "tcp port 4840",   # OPC-UA binary
+            "tcp port 4843",   # OPC-UA over TLS
+            # Heuristic TLS ports
+            "tcp port 8443", "tcp port 8444", "tcp port 9443",
+            "tcp port 4433", "tcp port 4434", "tcp port 4444",
+            "tcp port 2376", "tcp port 2377",
+            "tcp port 6443",
+            "tcp port 10250", "tcp port 10255",
+            "tcp port 2379", "tcp port 2380",
+            "tcp port 9200", "tcp port 9300",
+            "tcp port 27017",
+            "tcp port 6380",
+            "tcp port 9090", "tcp port 9091", "tcp port 9093", "tcp port 9094",
+            "tcp port 8080", "tcp port 8081", "tcp port 8888", "tcp port 8889",
+            "tcp port 5000", "tcp port 5001",
+            # ZRTP (RTP-based — broad UDP range; capture in ZRTP-likely ranges)
+            "udp portrange 5004-5005",   # RTP/RTCP
+            "udp portrange 16384-32767", # common RTP ephemeral range
         ]
 
         if not self.encrypted_only:
@@ -2015,7 +2485,9 @@ def main():
 Monitored protocols:
   TLS/HTTPS, QUIC/HTTP3, SSH (banner + KEX Init), IKEv2/IPsec, WireGuard,
   DTLS, DNS-over-TLS, DNSSEC, STARTTLS (SMTP/IMAP/POP3/FTP/LDAP),
-  SMB3, RDP/CredSSP, Kerberos, SNMPv3, OpenVPN, RADIUS, AMQP, SIP/SIPS
+  SMB3, RDP/CredSSP, Kerberos, SNMPv3, OpenVPN, RADIUS, AMQP, SIP/SIPS,
+  ZRTP, BGP/BGP-over-TLS, OPC-UA/OPC-UA-over-TLS,
+  heuristic TLS on 30+ non-standard ports (Kubernetes, Docker, MongoDB, etc.)
 
 Post-quantum indicators:
   Yes     — PQ-safe KEX/signature algorithm confirmed
