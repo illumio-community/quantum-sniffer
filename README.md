@@ -1,4 +1,6 @@
-# stinky - Comprehensive Crypto Protocol Sniffer
+# sniffy - Superposition Network Inspector For Funky Yields
+
+**⚠️ PRE-ALPHA SOFTWARE - Under active development, expect breaking changes and bugs**
 
 A network traffic analyzer that captures and analyzes cryptographic information from encrypted protocols including TLS, SSH, IPsec, WireGuard, DTLS, QUIC, and more. **Identifies post-quantum secure connections.**
 
@@ -73,7 +75,7 @@ Each connection is analyzed to determine quantum resistance:
 - Post-quantum security status highlighted
 - Connection details, crypto algorithms, key information
 
-**JSON Log (stinky.json):**
+**JSON Log (sniffy.json):**
 - Complete structured data
 - Machine-readable format
 - All captured fields preserved
@@ -89,7 +91,7 @@ Each connection is analyzed to determine quantum resistance:
 ### Install Dependencies
 
 ```bash
-cd ~/stinky
+cd ~/sniffy
 pip3 install -r requirements.txt
 ```
 
@@ -103,7 +105,7 @@ pip3 install scapy
 ### Basic Usage (Encrypted Only)
 
 ```bash
-sudo ./stinky.py
+sudo ./sniffy.py
 ```
 
 Monitors encrypted protocols on the default interface.
@@ -111,7 +113,7 @@ Monitors encrypted protocols on the default interface.
 ### Monitor All Protocols
 
 ```bash
-sudo ./stinky.py --all
+sudo ./sniffy.py --all
 ```
 
 Includes unencrypted protocols (HTTP, DNS, etc.).
@@ -119,14 +121,14 @@ Includes unencrypted protocols (HTTP, DNS, etc.).
 ### Specify Interface
 
 ```bash
-sudo ./stinky.py eth0
-sudo ./stinky.py -i wlan0
+sudo ./sniffy.py eth0
+sudo ./sniffy.py -i wlan0
 ```
 
 ### All Options
 
 ```bash
-sudo ./stinky.py -a -i eth0        # All protocols on eth0
+sudo ./sniffy.py -a -i eth0        # All protocols on eth0
 ```
 
 ### Command-Line Arguments
@@ -177,7 +179,7 @@ Crypto: Curve25519, ChaCha20-Poly1305
 ================================================================================
 ```
 
-### JSON Log (stinky.json)
+### JSON Log (sniffy.json)
 
 ```json
 [
@@ -261,40 +263,40 @@ Many systems use hybrid key exchange:
 
 Find systems using only classical crypto:
 ```bash
-jq '.[] | select(.post_quantum_secure == "No")' stinky.json
+jq '.[] | select(.post_quantum_secure == "No")' sniffy.json
 ```
 
 ### 2. Identify Weak Crypto
 
 Find deprecated TLS versions:
 ```bash
-jq '.[] | select(.tls_version == "TLS 1.0" or .tls_version == "TLS 1.1")' stinky.json
+jq '.[] | select(.tls_version == "TLS 1.0" or .tls_version == "TLS 1.1")' sniffy.json
 ```
 
 Find weak ciphers:
 ```bash
-jq '.[] | select(.selected_cipher.name | contains("RC4") or contains("DES") or contains("MD5"))' stinky.json
+jq '.[] | select(.selected_cipher.name | contains("RC4") or contains("DES") or contains("MD5"))' sniffy.json
 ```
 
 ### 3. Monitor Protocol Usage
 
 Count protocols:
 ```bash
-jq 'group_by(.protocol) | map({protocol: .[0].protocol, count: length})' stinky.json
+jq 'group_by(.protocol) | map({protocol: .[0].protocol, count: length})' sniffy.json
 ```
 
 ### 4. Track PQ Adoption
 
 Post-quantum security summary:
 ```bash
-jq 'group_by(.post_quantum_secure) | map({status: .[0].post_quantum_secure, count: length})' stinky.json
+jq 'group_by(.post_quantum_secure) | map({status: .[0].post_quantum_secure, count: length})' sniffy.json
 ```
 
 ### 5. Verify Forward Secrecy
 
 Check for RSA key exchange (no forward secrecy):
 ```bash
-jq '.[] | select(.selected_cipher.name | contains("RSA_WITH"))' stinky.json
+jq '.[] | select(.selected_cipher.name | contains("RSA_WITH"))' sniffy.json
 ```
 
 ## Viewing Results
@@ -302,45 +304,45 @@ jq '.[] | select(.selected_cipher.name | contains("RSA_WITH"))' stinky.json
 ### Pretty Print
 
 ```bash
-cat stinky.json | jq .
+cat sniffy.json | jq .
 ```
 
 ### Count Captures
 
 ```bash
-jq 'length' stinky.json
+jq 'length' sniffy.json
 ```
 
 ### Filter by Protocol
 
 ```bash
-jq '.[] | select(.protocol == "TLS")' stinky.json
-jq '.[] | select(.protocol == "WireGuard")' stinky.json
-jq '.[] | select(.protocol == "SSH")' stinky.json
+jq '.[] | select(.protocol == "TLS")' sniffy.json
+jq '.[] | select(.protocol == "WireGuard")' sniffy.json
+jq '.[] | select(.protocol == "SSH")' sniffy.json
 ```
 
 ### Extract Server Names
 
 ```bash
-jq '.[] | select(.server_name) | .server_name' stinky.json | sort -u
+jq '.[] | select(.server_name) | .server_name' sniffy.json | sort -u
 ```
 
 ### Show Selected Ciphers
 
 ```bash
-jq '.[] | select(.selected_cipher) | .selected_cipher.name' stinky.json | sort | uniq -c
+jq '.[] | select(.selected_cipher) | .selected_cipher.name' sniffy.json | sort | uniq -c
 ```
 
 ### Find PQ-Secure Connections
 
 ```bash
-jq '.[] | select(.post_quantum_secure == "Yes" or .post_quantum_secure == "Hybrid")' stinky.json
+jq '.[] | select(.post_quantum_secure == "Yes" or .post_quantum_secure == "Hybrid")' sniffy.json
 ```
 
 ### Export to CSV
 
 ```bash
-jq -r '.[] | [.timestamp, .protocol, .post_quantum_secure, .connection, .tls_version // .ssh_protocol_version, .selected_cipher.name // "-"] | @csv' stinky.json > report.csv
+jq -r '.[] | [.timestamp, .protocol, .post_quantum_secure, .connection, .tls_version // .ssh_protocol_version, .selected_cipher.name // "-"] | @csv' sniffy.json > report.csv
 ```
 
 ## Testing
@@ -349,7 +351,7 @@ jq -r '.[] | [.timestamp, .protocol, .post_quantum_secure, .connection, .tls_ver
 
 ```bash
 # Terminal 1: Start sniffer
-sudo ./stinky.py
+sudo ./sniffy.py
 
 # Terminal 2: Generate traffic
 curl https://example.com
@@ -363,14 +365,14 @@ ping 8.8.8.8  # ICMP (if --all mode)
 If you have WireGuard configured:
 ```bash
 sudo wg-quick up wg0
-# stinky will capture the handshake
+# sniffy will capture the handshake
 ```
 
 ### Test with OpenVPN
 
 ```bash
 sudo openvpn client.conf
-# stinky will capture TLS handshake
+# sniffy will capture TLS handshake
 ```
 
 ## Limitations
@@ -393,14 +395,14 @@ ip link show
 curl https://example.com
 
 # Try specific interface
-sudo ./stinky.py -i eth0
+sudo ./sniffy.py -i eth0
 ```
 
 ### Permission denied
 
 ```bash
 # Use sudo
-sudo ./stinky.py
+sudo ./sniffy.py
 ```
 
 ### Scapy not installed
@@ -413,7 +415,7 @@ pip3 install scapy
 
 ```bash
 # Filter by specific IP
-# Edit stinky.py, add to filter_str:
+# Edit sniffy.py, add to filter_str:
 "and host 10.1.1.100"
 ```
 
@@ -464,7 +466,7 @@ Potential additions:
 
 For issues or questions:
 - Check QUICKSTART.md for common examples
-- Review documentation in ~/stinky/
+- Review documentation in ~/sniffy/
 
 Enjoy quantum-safe network analysis! 🔐
 
