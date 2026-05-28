@@ -780,6 +780,15 @@ class CryptoSniffer:
             # If decryption failed or no PQ groups found, assume classical
             return "No"
 
+        # TLS ServerHello: If we have a cipher but no key exchange info, it's classical
+        # This handles cases where key_share parsing failed but we know it's TLS 1.3
+        # PQ TLS is still experimental as of 2026; standard TLS 1.3 is classical ECDHE
+        if (info.get("protocol") == "TLS" and
+            info.get("type") == "TLS ServerHello" and
+            "selected_cipher" in info and
+            not pq_kex and not classical_kex):
+            return "No"
+
         if pq_kex and classical_kex:
             return "Hybrid"
         elif pq_kex:
@@ -922,10 +931,29 @@ class CryptoSniffer:
                 ext_name = TLS_EXTENSIONS.get(ext_type, f"unknown_{ext_type}")
                 extensions.append(ext_name)
 
-                if ext_type == 51 and hasattr(ext, "group"):
-                    supported_groups.append(
-                        TLS_NAMED_GROUPS.get(ext.group, f"group_0x{ext.group:04x}")
-                    )
+                # key_share extension (type 51) - extract group from ServerHello
+                if ext_type == 51:
+                    # Try multiple ways to extract the group
+                    group = None
+                    if hasattr(ext, "group"):
+                        group = ext.group
+                    elif hasattr(ext, "server_share") and hasattr(ext.server_share, "group"):
+                        group = ext.server_share.group
+                    else:
+                        # Manual parse: ServerHello key_share format is:
+                        # type(2) | length(2) | group(2) | key_length(2) | key_exchange(n)
+                        try:
+                            raw = bytes(ext)
+                            if len(raw) >= 6:
+                                # Skip type(2) + length(2), read group(2)
+                                group = struct.unpack("!H", raw[4:6])[0]
+                        except:
+                            pass
+
+                    if group is not None:
+                        supported_groups.append(
+                            TLS_NAMED_GROUPS.get(group, f"group_0x{group:04x}")
+                        )
 
                 if ext_type == 16:
                     raw = bytes(ext)
