@@ -22,12 +22,16 @@ import hashlib
 import struct
 import argparse
 import warnings
+import logging
 from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
 
 # Suppress Scapy warnings about unknown cipher suites (GREASE values)
 warnings.filterwarnings("ignore", message=".*Unknown cipher suite.*")
+# Also suppress via logging (Scapy uses both)
+logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
+logging.getLogger("scapy").setLevel(logging.ERROR)
 
 try:
     from scapy.all import sniff, Raw
