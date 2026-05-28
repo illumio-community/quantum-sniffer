@@ -21,9 +21,13 @@ import hmac as _hmac
 import hashlib
 import struct
 import argparse
+import warnings
 from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
+
+# Suppress Scapy warnings about unknown cipher suites (GREASE values)
+warnings.filterwarnings("ignore", message=".*Unknown cipher suite.*")
 
 try:
     from scapy.all import sniff, Raw
