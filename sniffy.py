@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-stinky - Comprehensive Crypto Protocol Sniffer
+sniffy - Superposition Network Inspector For Funky Yields
 
 Captures and analyzes encrypted protocol handshakes including TLS, SSH, IPsec,
 DTLS, QUIC, WireGuard, RDP, Kerberos, RADIUS, and more. Identifies post-quantum
 secure connections.
 
-Usage: sudo ./stinky.py [options] [interface]
+Usage: sudo ./sniffy.py [options] [interface]
        -a, --all          Include unencrypted protocols (default: encrypted only)
        -i, --interface    Network interface to monitor
 
@@ -147,7 +147,6 @@ TLS_NAMED_GROUPS = {
     0x11eb: "x25519kyber512",
     0x6399: "x25519kyber768",   # Chrome/BoringSSL
     0x639a: "x25519mlkem768",   # Chrome/BoringSSL draft
-    0x0:   "mlkem512",
 }
 
 # ---------------------------------------------------------------------------
@@ -677,7 +676,7 @@ def _parse_tls_hello_raw(data):
 # ---------------------------------------------------------------------------
 
 class CryptoSniffer:
-    def __init__(self, interface=None, log_file="stinky.json", encrypted_only=True):
+    def __init__(self, interface=None, log_file="sniffy.json", encrypted_only=True):
         self.interface = interface
         self.log_file = Path(log_file)
         self.encrypted_only = encrypted_only
@@ -2293,7 +2292,8 @@ class CryptoSniffer:
             print(f"Application: {info['application']}")
 
         if "tls_version" in info:
-            print(f"TLS Version: {info['tls_version']} ({info['tls_version_value']})")
+            version_val = f" ({info['tls_version_value']})" if "tls_version_value" in info else ""
+            print(f"TLS Version: {info['tls_version']}{version_val}")
 
         if "server_name" in info:
             print(f"SNI:         {info['server_name']}")
@@ -2432,7 +2432,7 @@ class CryptoSniffer:
             print(f"ERROR: Failed to write log: {e}", file=sys.stderr)
 
     def start_sniffing(self):
-        print(f"[*] Starting stinky crypto sniffer")
+        print(f"[*] Starting sniffy crypto sniffer")
         print(f"[*] Interface: {self.interface or 'default'}")
         print(f"[*] Log file:  {self.log_file}")
         print(f"[*] Mode:      {'Encrypted only' if self.encrypted_only else 'All protocols'}")
@@ -2517,8 +2517,8 @@ class CryptoSniffer:
                 for e in self.log_entries:
                     p = e.get("protocol", "Unknown")
                     protos[p] = protos.get(p, 0) + 1
-                    pq_stats[e.get("post_quantum_secure", "Unknown")] = \
-                        pq_stats.get(e.get("post_quantum_secure", "Unknown"), 0) + 1
+                    pq = e.get("post_quantum_secure", "Unknown")
+                    pq_stats[pq] = pq_stats.get(pq, 0) + 1
                 print("\n[*] Protocol Summary:")
                 for p, cnt in sorted(protos.items(), key=lambda x: -x[1]):
                     print(f"    {p}: {cnt}")
@@ -2539,7 +2539,7 @@ class CryptoSniffer:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="stinky — Comprehensive Crypto Protocol Sniffer",
+        description="sniffy — Superposition Network Inspector For Funky Yields",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Monitored protocols:
@@ -2570,14 +2570,14 @@ QUIC Initial packet decryption requires: pip install cryptography
 
     print("""
 ╔═══════════════════════════════════════════════════════════════════╗
-║                            STINKY                                 ║
-║            Comprehensive Crypto Protocol Sniffer                  ║
+║                            SNIFFY                                 ║
+║   Superposition Network Inspector For Funky Yields                ║
 ╚═══════════════════════════════════════════════════════════════════╝
 """)
 
     sniffer = CryptoSniffer(
         interface=interface,
-        log_file="stinky.json",
+        log_file="sniffy.json",
         encrypted_only=not args.all,
     )
     sniffer.start_sniffing()
