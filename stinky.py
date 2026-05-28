@@ -772,6 +772,14 @@ class CryptoSniffer:
         if info.get("protocol") == "SIP" and not pq_kex and not classical_kex:
             return "No"
 
+        # QUIC: If we couldn't decrypt to determine PQ status, default to "No"
+        # QUIC uses TLS 1.3 which is classical (ECDHE) unless PQ extensions are present
+        # As of 2026, PQ in QUIC/TLS 1.3 is still experimental/rare
+        if info.get("protocol") == "QUIC" and not pq_kex and not classical_kex:
+            # Check if we successfully decrypted - if so, we would have seen supported_groups
+            # If decryption failed or no PQ groups found, assume classical
+            return "No"
+
         if pq_kex and classical_kex:
             return "Hybrid"
         elif pq_kex:
@@ -1260,24 +1268,46 @@ class CryptoSniffer:
             try:
                 key, iv, hp = _quic_derive_keys(dcid, version)
 
-                # Build raw header bytes (up to pn_offset) for HP removal
-                raw_header = bytearray(raw[:pn_offset + 4])
-                payload_start = pn_offset  # before HP removal, PN length unknown
-                enc_payload = raw[pn_offset:pn_offset + pkt_len]
+                # Extract the complete QUIC packet payload
+                # pkt_len is the length field from the QUIC header (includes PN + encrypted payload)
+                if pn_offset + pkt_len > len(raw):
+                    raise ValueError("Packet length exceeds available data")
 
+                packet_payload = raw[pn_offset:pn_offset + pkt_len]
+
+                # For header protection removal, we need the first byte + up to PN + sample (16 bytes at PN+4)
+                # Build header with maximum PN length (4 bytes) for HP removal
+                if len(packet_payload) < 20:  # Need at least 4 (max PN) + 16 (sample)
+                    raise ValueError("Packet too short for decryption")
+
+                # Header protection removal needs header up to and including PN
+                # Create a working copy with enough bytes for the sample
+                raw_header_with_pn = bytearray(raw[:pn_offset + 4])
+
+                # Remove header protection
                 unprotected_header, pn_len = _quic_remove_header_protection(
-                    raw_header, enc_payload, hp
+                    raw_header_with_pn, packet_payload, hp
                 )
+
                 if unprotected_header and pn_len > 0:
-                    # Reconstruct packet number
+                    # Extract actual packet number bytes
                     pn_bytes = unprotected_header[-pn_len:]
                     packet_number = int.from_bytes(pn_bytes, "big")
 
-                    # Ciphertext is everything after the packet number, minus 16-byte AEAD tag
-                    ciphertext = enc_payload[pn_len:]
-                    aad = bytes(unprotected_header)
+                    # Build AAD: The AAD for QUIC is the complete unprotected header
+                    # from the first byte up to and including the packet number.
+                    # unprotected_header has the form: [all header bytes up to PN + 4 bytes for PN]
+                    # We need: [all header bytes up to PN + actual pn_len bytes]
+                    # The unprotected_header length is pn_offset + 4
+                    # We want length pn_offset + pn_len
+                    aad_len = pn_offset + pn_len
+                    aad = unprotected_header[:aad_len]
 
-                    plaintext = _quic_decrypt_payload(key, iv, packet_number, ciphertext, aad)
+                    # Encrypted payload is everything after the PN
+                    encrypted_payload = packet_payload[pn_len:]
+
+                    # Decrypt
+                    plaintext = _quic_decrypt_payload(key, iv, packet_number, encrypted_payload, aad)
                     if plaintext:
                         tls_hello = _extract_quic_tls_hello(plaintext)
                         if tls_hello and len(tls_hello) > 38:
@@ -1317,7 +1347,9 @@ class CryptoSniffer:
                                         if alpn_protocols:
                                             info["alpn_protocols"] = alpn_protocols
                                         info["quic_tls_decrypted"] = True
-            except Exception:
+            except Exception as e:
+                # Store decryption failure info for debugging
+                info["quic_decrypt_error"] = str(e)
                 pass  # fall through to base detection
 
         info["post_quantum_secure"] = self.check_pq_security(info)
