@@ -145,8 +145,9 @@ TLS_NAMED_GROUPS = {
     # IANA-assigned PQ groups (draft-ietf-tls-hybrid-design)
     0x0200: "kyber512",   0x0201: "kyber768",   0x0202: "kyber1024",
     0x11eb: "x25519kyber512",
-    0x6399: "x25519kyber768",   # Chrome/BoringSSL
-    0x639a: "x25519mlkem768",   # Chrome/BoringSSL draft
+    0x11ec: "x25519kyber768",   # IANA-assigned (Cloudflare)
+    0x6399: "x25519kyber768",   # Chrome/BoringSSL experimental
+    0x639a: "x25519mlkem768",   # Chrome/BoringSSL ML-KEM draft
 }
 
 # ---------------------------------------------------------------------------
@@ -788,13 +789,15 @@ class CryptoSniffer:
             # If decryption failed or no PQ groups found, assume classical
             return "No"
 
-        # TLS ServerHello: If we have a cipher but no key exchange info, it's classical
-        # This handles cases where key_share parsing failed but we know it's TLS 1.3
-        # PQ TLS is still experimental as of 2026; standard TLS 1.3 is classical ECDHE
+        # TLS ServerHello: If we have a cipher but no key exchange info
         if (info.get("protocol") == "TLS" and
             info.get("type") == "TLS ServerHello" and
             "selected_cipher" in info and
             not pq_kex and not classical_kex):
+            # If we detected key_share but failed to parse it, return Unknown
+            if info.get("key_share_parse_failed"):
+                return "Unknown"
+            # Otherwise, if no key exchange detected at all, it's likely TLS 1.2 or earlier (classical)
             return "No"
 
         if pq_kex and classical_kex:
@@ -802,6 +805,13 @@ class CryptoSniffer:
         elif pq_kex:
             return "Yes"
         elif classical_kex:
+            # Add a note for sites that should support PQ but show as classical
+            # This helps users understand if their client doesn't support PQ
+            if info.get("protocol") == "TLS" and info.get("server_name"):
+                sni = info["server_name"].lower()
+                if "pq" in sni or "quantumresearch" in sni or "cloudflareresearch" in sni:
+                    info["note"] = (info.get("note", "") + " | " if info.get("note") else "") + \
+                                   "Site supports PQ but client negotiated classical KEX - browser may not support PQ TLS"
             return "No"
         else:
             return "Unknown"
@@ -933,6 +943,7 @@ class CryptoSniffer:
             extensions = []
             supported_groups = []
             alpn_protocols = []
+            has_key_share = False
 
             for ext in sh.ext:
                 ext_type = getattr(ext, "type", None)
@@ -941,6 +952,7 @@ class CryptoSniffer:
 
                 # key_share extension (type 51) - extract group from ServerHello
                 if ext_type == 51:
+                    has_key_share = True
                     # Try multiple ways to extract the group
                     group = None
                     if hasattr(ext, "group"):
@@ -948,20 +960,43 @@ class CryptoSniffer:
                     elif hasattr(ext, "server_share") and hasattr(ext.server_share, "group"):
                         group = ext.server_share.group
                     else:
-                        # Manual parse: ServerHello key_share format is:
-                        # type(2) | length(2) | group(2) | key_length(2) | key_exchange(n)
+                        # Manual parse: ServerHello key_share format
+                        # The extension data contains: group(2) | key_length(2) | key_exchange(n)
+                        # Scapy's bytes(ext) representation varies, so try multiple offsets
                         try:
                             raw = bytes(ext)
-                            if len(raw) >= 6:
-                                # Skip type(2) + length(2), read group(2)
-                                group = struct.unpack("!H", raw[4:6])[0]
+                            if len(raw) >= 2:
+                                # Try multiple offsets to find the group ID
+                                candidates = []
+                                # Check common offsets: 0 (data only), 4 (with type+length), 2 (just length)
+                                for offset in [0, 2, 4, 6, 8]:
+                                    if offset + 2 <= len(raw):
+                                        candidate = struct.unpack("!H", raw[offset:offset+2])[0]
+                                        # Check if this looks like a valid group ID
+                                        if (candidate in TLS_NAMED_GROUPS or
+                                            23 <= candidate <= 30 or  # Standard curves (secp256r1, x25519, x448)
+                                            256 <= candidate <= 260 or  # FFDHE groups
+                                            0x0200 <= candidate <= 0x0202 or  # Kyber standalone
+                                            0x11eb <= candidate <= 0x11ec or  # x25519kyber512, x25519kyber768
+                                            0x6399 <= candidate <= 0x639a):  # Chrome experimental PQ groups
+                                            # Score based on known groups (prefer exact matches)
+                                            score = 2 if candidate in TLS_NAMED_GROUPS else 1
+                                            candidates.append((score, offset, candidate))
+
+                                # Use the highest-scored candidate (known groups preferred)
+                                if candidates:
+                                    candidates.sort(reverse=True)  # Sort by score descending
+                                    group = candidates[0][2]  # Get the candidate value
                         except Exception:
                             pass
 
                     if group is not None:
-                        supported_groups.append(
-                            TLS_NAMED_GROUPS.get(group, f"group_0x{group:04x}")
-                        )
+                        group_name = TLS_NAMED_GROUPS.get(group, f"group_0x{group:04x}")
+                        supported_groups.append(group_name)
+                        # Extra debug: if this is a known PQ group, mark it explicitly
+                        if group in (0x6399, 0x639a, 0x11eb, 0x11ec, 0x0200, 0x0201, 0x0202):
+                            # Known PQ group detected - store flag to aid debugging
+                            info["_debug_pq_group_id"] = f"0x{group:04x}"
 
                 if ext_type == 16:
                     raw = bytes(ext)
@@ -974,6 +1009,12 @@ class CryptoSniffer:
                 info["alpn_protocols"] = alpn_protocols
                 if "h2" in alpn_protocols:
                     info["application"] = "gRPC / HTTP2"
+
+            # Store whether key_share was present (even if we couldn't parse the group)
+            if has_key_share:
+                if not supported_groups:
+                    info["key_share_parse_failed"] = True
+                    info["note"] = "TLS key_share extension detected but group parsing failed"
 
         info["post_quantum_secure"] = self.check_pq_security(info)
         return info
