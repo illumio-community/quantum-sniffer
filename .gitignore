@@ -1,4 +1,8 @@
+# Add-ons directory (experimental features, utilities, examples)
+add-ons/
+
 # Generated capture data
+sniffy.json
 stinky.json
 
 # Generated reports (exclude all except examples)
