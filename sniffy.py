@@ -639,9 +639,13 @@ def _parse_tls_hello_raw(data):
 
     if hs_type == 0x01:  # ClientHello
         if pos >= len(body): return result
-        sid_len = body[pos]; pos += 1 + sid_len
+        sid_len = body[pos]
+        if pos + 1 + sid_len > len(body): return result
+        pos += 1 + sid_len
         if pos + 2 > len(body): return result
-        cs_len = struct.unpack(">H", body[pos:pos + 2])[0]; pos += 2
+        cs_len = struct.unpack(">H", body[pos:pos + 2])[0]
+        if pos + 2 + cs_len > len(body): return result
+        pos += 2
         ciphers = []
         for i in range(0, cs_len, 2):
             if pos + i + 2 <= len(body):
@@ -651,14 +655,19 @@ def _parse_tls_hello_raw(data):
         result["client_cipher_suites"] = ciphers
         result["cipher_count"] = len(ciphers)
         pos += cs_len
-        if pos < len(body): comp_len = body[pos]; pos += 1 + comp_len
+        if pos < len(body):
+            comp_len = body[pos]
+            if pos + 1 + comp_len > len(body): return result
+            pos += 1 + comp_len
         if pos + 2 <= len(body):
             ext_len = struct.unpack(">H", body[pos:pos + 2])[0]; pos += 2
             result.update(_parse_tls_extensions_raw(body, pos, pos + ext_len))
 
     elif hs_type == 0x02:  # ServerHello
         if pos >= len(body): return result
-        sid_len = body[pos]; pos += 1 + sid_len
+        sid_len = body[pos]
+        if pos + 1 + sid_len > len(body): return result
+        pos += 1 + sid_len
         if pos + 3 > len(body): return result
         cs = struct.unpack(">H", body[pos:pos + 2])[0]
         result["selected_cipher"] = {"name": TLS_CIPHER_SUITES.get(cs, f"UNKNOWN_0x{cs:04x}"),
@@ -946,7 +955,7 @@ class CryptoSniffer:
                             if len(raw) >= 6:
                                 # Skip type(2) + length(2), read group(2)
                                 group = struct.unpack("!H", raw[4:6])[0]
-                        except:
+                        except Exception:
                             pass
 
                     if group is not None:
@@ -1344,36 +1353,45 @@ class CryptoSniffer:
                             if len(body) > 34:
                                 # Legacy version (2) + random (32) + session_id_len (1)
                                 sid_len = body[34]
-                                pos = 35 + sid_len
-                                if pos + 2 <= len(body):
-                                    cs_len = struct.unpack(">H", body[pos:pos+2])[0]
-                                    pos += 2 + cs_len + 1  # ciphers + compression_len
+                                if 35 + sid_len <= len(body):
+                                    pos = 35 + sid_len
                                     if pos + 2 <= len(body):
-                                        ext_len = struct.unpack(">H", body[pos:pos+2])[0]
-                                        pos += 2
-                                        ext_end = pos + ext_len
-                                        supported_groups = []
-                                        alpn_protocols = []
-                                        while pos + 4 <= ext_end and pos + 4 <= len(body):
-                                            ext_type = struct.unpack(">H", body[pos:pos+2])[0]
-                                            ext_data_len = struct.unpack(">H", body[pos+2:pos+4])[0]
-                                            ext_data = body[pos+4:pos+4+ext_data_len]
-                                            if ext_type == 10 and len(ext_data) >= 2:  # supported_groups
-                                                gl = struct.unpack(">H", ext_data[0:2])[0]
-                                                for gi in range(2, 2 + gl, 2):
-                                                    if gi + 2 <= len(ext_data):
-                                                        gid = struct.unpack(">H", ext_data[gi:gi+2])[0]
-                                                        supported_groups.append(
-                                                            TLS_NAMED_GROUPS.get(gid, f"group_0x{gid:04x}")
-                                                        )
-                                            if ext_type == 16:
-                                                alpn_protocols = self._parse_alpn_ext(ext_data)
-                                            pos += 4 + ext_data_len
-                                        if supported_groups:
-                                            info["supported_groups"] = supported_groups
-                                        if alpn_protocols:
-                                            info["alpn_protocols"] = alpn_protocols
-                                        info["quic_tls_decrypted"] = True
+                                        cs_len = struct.unpack(">H", body[pos:pos+2])[0]
+                                        if pos + 2 + cs_len <= len(body):
+                                            pos += 2 + cs_len
+                                            # Read compression methods length
+                                            if pos < len(body):
+                                                comp_len = body[pos]
+                                                if pos + 1 + comp_len <= len(body):
+                                                    pos += 1 + comp_len
+                                                    if pos + 2 <= len(body):
+                                                        ext_len = struct.unpack(">H", body[pos:pos+2])[0]
+                                                        pos += 2
+                                                        ext_end = pos + ext_len
+                                                        supported_groups = []
+                                                        alpn_protocols = []
+                                                        while pos + 4 <= ext_end and pos + 4 <= len(body):
+                                                            ext_type = struct.unpack(">H", body[pos:pos+2])[0]
+                                                            ext_data_len = struct.unpack(">H", body[pos+2:pos+4])[0]
+                                                            if pos + 4 + ext_data_len > len(body):
+                                                                break
+                                                            ext_data = body[pos+4:pos+4+ext_data_len]
+                                                            if ext_type == 10 and len(ext_data) >= 2:  # supported_groups
+                                                                gl = struct.unpack(">H", ext_data[0:2])[0]
+                                                                for gi in range(2, 2 + gl, 2):
+                                                                    if gi + 2 <= len(ext_data):
+                                                                        gid = struct.unpack(">H", ext_data[gi:gi+2])[0]
+                                                                        supported_groups.append(
+                                                                            TLS_NAMED_GROUPS.get(gid, f"group_0x{gid:04x}")
+                                                                        )
+                                                            if ext_type == 16:
+                                                                alpn_protocols = self._parse_alpn_ext(ext_data)
+                                                            pos += 4 + ext_data_len
+                                                        if supported_groups:
+                                                            info["supported_groups"] = supported_groups
+                                                        if alpn_protocols:
+                                                            info["alpn_protocols"] = alpn_protocols
+                                                        info["quic_tls_decrypted"] = True
             except Exception as e:
                 # Store decryption failure info for debugging
                 info["quic_decrypt_error"] = str(e)
