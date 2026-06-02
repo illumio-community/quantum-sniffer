@@ -1,4 +1,4 @@
-# quantum-sniffer - Superposition Network Inspector For Funky Yields
+# quantum-sniffer
 
 **⚠️ PRE-ALPHA SOFTWARE - Under active development, expect breaking changes and bugs**
 
