@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-sniffy - Superposition Network Inspector For Funky Yields
+quantum-sniffer - Quantum-Safe Network Inspector
 
 Captures and analyzes encrypted protocol handshakes including TLS, SSH, IPsec,
 DTLS, QUIC, WireGuard, RDP, Kerberos, RADIUS, and more. Identifies post-quantum
 secure connections.
 
-Usage: sudo ./sniffy.py [options] [interface]
+Usage: sudo ./quantum-sniffer.py [options] [interface]
        -a, --all          Include unencrypted protocols (default: encrypted only)
        -i, --interface    Network interface to monitor
 
@@ -694,7 +694,7 @@ def _parse_tls_hello_raw(data):
 # ---------------------------------------------------------------------------
 
 class CryptoSniffer:
-    def __init__(self, interface=None, log_file="sniffy.json", encrypted_only=True):
+    def __init__(self, interface=None, log_file="quantum-sniffer.json", encrypted_only=True):
         self.interface = interface
         self.log_file = Path(log_file)
         self.encrypted_only = encrypted_only
@@ -2499,7 +2499,7 @@ class CryptoSniffer:
             print(f"ERROR: Failed to write log: {e}", file=sys.stderr)
 
     def start_sniffing(self):
-        print(f"[*] Starting sniffy crypto sniffer")
+        print(f"[*] Starting quantum-sniffer crypto sniffer")
         print(f"[*] Interface: {self.interface or 'default'}")
         print(f"[*] Log file:  {self.log_file}")
         print(f"[*] Mode:      {'Encrypted only' if self.encrypted_only else 'All protocols'}")
@@ -2606,7 +2606,7 @@ class CryptoSniffer:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="sniffy — Superposition Network Inspector For Funky Yields",
+        description="quantum-sniffer — Quantum-Safe Network Inspector",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Monitored protocols:
@@ -2644,7 +2644,7 @@ QUIC Initial packet decryption requires: pip install cryptography
 
     sniffer = CryptoSniffer(
         interface=interface,
-        log_file="sniffy.json",
+        log_file="quantum-sniffer.json",
         encrypted_only=not args.all,
     )
     sniffer.start_sniffing()

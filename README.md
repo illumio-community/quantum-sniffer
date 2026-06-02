@@ -1,4 +1,4 @@
-# sniffy - Superposition Network Inspector For Funky Yields
+# quantum-sniffer - Superposition Network Inspector For Funky Yields
 
 **⚠️ PRE-ALPHA SOFTWARE - Under active development, expect breaking changes and bugs**
 
@@ -75,7 +75,7 @@ Each connection is analyzed to determine quantum resistance:
 - Post-quantum security status highlighted
 - Connection details, crypto algorithms, key information
 
-**JSON Log (sniffy.json):**
+**JSON Log (quantum-sniffer.json):**
 - Complete structured data
 - Machine-readable format
 - All captured fields preserved
@@ -91,7 +91,7 @@ Each connection is analyzed to determine quantum resistance:
 ### Install Dependencies
 
 ```bash
-cd ~/sniffy
+cd ~/quantum-sniffer
 pip3 install -r requirements.txt
 ```
 
@@ -105,7 +105,7 @@ pip3 install scapy
 ### Basic Usage (Encrypted Only)
 
 ```bash
-sudo ./sniffy.py
+sudo ./quantum-sniffer.py
 ```
 
 Monitors encrypted protocols on the default interface.
@@ -113,7 +113,7 @@ Monitors encrypted protocols on the default interface.
 ### Monitor All Protocols
 
 ```bash
-sudo ./sniffy.py --all
+sudo ./quantum-sniffer.py --all
 ```
 
 Includes unencrypted protocols (HTTP, DNS, etc.).
@@ -121,14 +121,14 @@ Includes unencrypted protocols (HTTP, DNS, etc.).
 ### Specify Interface
 
 ```bash
-sudo ./sniffy.py eth0
-sudo ./sniffy.py -i wlan0
+sudo ./quantum-sniffer.py eth0
+sudo ./quantum-sniffer.py -i wlan0
 ```
 
 ### All Options
 
 ```bash
-sudo ./sniffy.py -a -i eth0        # All protocols on eth0
+sudo ./quantum-sniffer.py -a -i eth0        # All protocols on eth0
 ```
 
 ### Command-Line Arguments
@@ -179,7 +179,7 @@ Crypto: Curve25519, ChaCha20-Poly1305
 ================================================================================
 ```
 
-### JSON Log (sniffy.json)
+### JSON Log (quantum-sniffer.json)
 
 ```json
 [
@@ -263,40 +263,40 @@ Many systems use hybrid key exchange:
 
 Find systems using only classical crypto:
 ```bash
-jq '.[] | select(.post_quantum_secure == "No")' sniffy.json
+jq '.[] | select(.post_quantum_secure == "No")' quantum-sniffer.json
 ```
 
 ### 2. Identify Weak Crypto
 
 Find deprecated TLS versions:
 ```bash
-jq '.[] | select(.tls_version == "TLS 1.0" or .tls_version == "TLS 1.1")' sniffy.json
+jq '.[] | select(.tls_version == "TLS 1.0" or .tls_version == "TLS 1.1")' quantum-sniffer.json
 ```
 
 Find weak ciphers:
 ```bash
-jq '.[] | select(.selected_cipher.name | contains("RC4") or contains("DES") or contains("MD5"))' sniffy.json
+jq '.[] | select(.selected_cipher.name | contains("RC4") or contains("DES") or contains("MD5"))' quantum-sniffer.json
 ```
 
 ### 3. Monitor Protocol Usage
 
 Count protocols:
 ```bash
-jq 'group_by(.protocol) | map({protocol: .[0].protocol, count: length})' sniffy.json
+jq 'group_by(.protocol) | map({protocol: .[0].protocol, count: length})' quantum-sniffer.json
 ```
 
 ### 4. Track PQ Adoption
 
 Post-quantum security summary:
 ```bash
-jq 'group_by(.post_quantum_secure) | map({status: .[0].post_quantum_secure, count: length})' sniffy.json
+jq 'group_by(.post_quantum_secure) | map({status: .[0].post_quantum_secure, count: length})' quantum-sniffer.json
 ```
 
 ### 5. Verify Forward Secrecy
 
 Check for RSA key exchange (no forward secrecy):
 ```bash
-jq '.[] | select(.selected_cipher.name | contains("RSA_WITH"))' sniffy.json
+jq '.[] | select(.selected_cipher.name | contains("RSA_WITH"))' quantum-sniffer.json
 ```
 
 ## Viewing Results
@@ -304,45 +304,45 @@ jq '.[] | select(.selected_cipher.name | contains("RSA_WITH"))' sniffy.json
 ### Pretty Print
 
 ```bash
-cat sniffy.json | jq .
+cat quantum-sniffer.json | jq .
 ```
 
 ### Count Captures
 
 ```bash
-jq 'length' sniffy.json
+jq 'length' quantum-sniffer.json
 ```
 
 ### Filter by Protocol
 
 ```bash
-jq '.[] | select(.protocol == "TLS")' sniffy.json
-jq '.[] | select(.protocol == "WireGuard")' sniffy.json
-jq '.[] | select(.protocol == "SSH")' sniffy.json
+jq '.[] | select(.protocol == "TLS")' quantum-sniffer.json
+jq '.[] | select(.protocol == "WireGuard")' quantum-sniffer.json
+jq '.[] | select(.protocol == "SSH")' quantum-sniffer.json
 ```
 
 ### Extract Server Names
 
 ```bash
-jq '.[] | select(.server_name) | .server_name' sniffy.json | sort -u
+jq '.[] | select(.server_name) | .server_name' quantum-sniffer.json | sort -u
 ```
 
 ### Show Selected Ciphers
 
 ```bash
-jq '.[] | select(.selected_cipher) | .selected_cipher.name' sniffy.json | sort | uniq -c
+jq '.[] | select(.selected_cipher) | .selected_cipher.name' quantum-sniffer.json | sort | uniq -c
 ```
 
 ### Find PQ-Secure Connections
 
 ```bash
-jq '.[] | select(.post_quantum_secure == "Yes" or .post_quantum_secure == "Hybrid")' sniffy.json
+jq '.[] | select(.post_quantum_secure == "Yes" or .post_quantum_secure == "Hybrid")' quantum-sniffer.json
 ```
 
 ### Export to CSV
 
 ```bash
-jq -r '.[] | [.timestamp, .protocol, .post_quantum_secure, .connection, .tls_version // .ssh_protocol_version, .selected_cipher.name // "-"] | @csv' sniffy.json > report.csv
+jq -r '.[] | [.timestamp, .protocol, .post_quantum_secure, .connection, .tls_version // .ssh_protocol_version, .selected_cipher.name // "-"] | @csv' quantum-sniffer.json > report.csv
 ```
 
 ## Testing
@@ -351,7 +351,7 @@ jq -r '.[] | [.timestamp, .protocol, .post_quantum_secure, .connection, .tls_ver
 
 ```bash
 # Terminal 1: Start sniffer
-sudo ./sniffy.py
+sudo ./quantum-sniffer.py
 
 # Terminal 2: Generate traffic
 curl https://example.com
@@ -365,14 +365,14 @@ ping 8.8.8.8  # ICMP (if --all mode)
 If you have WireGuard configured:
 ```bash
 sudo wg-quick up wg0
-# sniffy will capture the handshake
+# quantum-sniffer will capture the handshake
 ```
 
 ### Test with OpenVPN
 
 ```bash
 sudo openvpn client.conf
-# sniffy will capture TLS handshake
+# quantum-sniffer will capture TLS handshake
 ```
 
 ## Limitations
@@ -395,14 +395,14 @@ ip link show
 curl https://example.com
 
 # Try specific interface
-sudo ./sniffy.py -i eth0
+sudo ./quantum-sniffer.py -i eth0
 ```
 
 ### Permission denied
 
 ```bash
 # Use sudo
-sudo ./sniffy.py
+sudo ./quantum-sniffer.py
 ```
 
 ### Scapy not installed
@@ -415,7 +415,7 @@ pip3 install scapy
 
 ```bash
 # Filter by specific IP
-# Edit sniffy.py, add to filter_str:
+# Edit quantum-sniffer.py, add to filter_str:
 "and host 10.1.1.100"
 ```
 
@@ -466,7 +466,7 @@ Potential additions:
 
 For issues or questions:
 - Check QUICKSTART.md for common examples
-- Review documentation in ~/sniffy/
+- Review documentation in ~/quantum-sniffer/
 
 Enjoy quantum-safe network analysis! 🔐
 
