@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quantum-sniffer"
+version = "0.2.0"
+description = "Post-quantum-aware network handshake inspector for TLS, SSH, IKE, QUIC, WireGuard, and more"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.9"
+authors = [{ name = "quantum-sniffer authors" }]
+keywords = [
+    "network",
+    "security",
+    "post-quantum",
+    "cryptography",
+    "tls",
+    "ssh",
+    "ipsec",
+    "quic",
+    "wireguard",
+    "packet-capture",
+    "scapy",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Security :: Cryptography",
+    "Topic :: System :: Networking :: Monitoring",
+]
+dependencies = [
+    "scapy>=2.4.5",
+]
+
+[project.optional-dependencies]
+quic = ["cryptography>=42.0.0"]
+test = ["pytest>=7.0"]
+dev  = ["pytest>=7.0", "build>=1.0", "twine>=5.0"]
+
+[project.scripts]
+quantum-sniffer = "quantum_sniffer.cli:main"
+
+[project.urls]
+Homepage  = "https://github.com/illumio-community/quantum-sniffer"
+Issues    = "https://github.com/illumio-community/quantum-sniffer/issues"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "quantum_sniffer/",
+    "tests/",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["quantum_sniffer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

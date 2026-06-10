@@ -1,9 +1,18 @@
 # Add-ons directory (experimental features, utilities, examples)
 add-ons/
+stinky/
 
 # Generated capture data
+*.jsonl
 sniffy.json
 stinky.json
+quantum-sniffer.json
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
 
 # Generated reports (exclude all except examples)
 *_report.txt

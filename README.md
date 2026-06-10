@@ -1,475 +1,213 @@
 # quantum-sniffer
 
-**⚠️ PRE-ALPHA SOFTWARE - Under active development, expect breaking changes and bugs**
+A network traffic analyzer that captures and classifies cryptographic
+handshakes from encrypted protocols (TLS, SSH, IPsec, WireGuard, DTLS, QUIC,
+DoT, STARTTLS, SMB, RDP, Kerberos, SNMPv3, OpenVPN, RADIUS, AMQP, SIP/SIPS,
+ZRTP, BGP, OPC-UA, and more) and tags each one as **post-quantum secure**,
+**hybrid**, **classical**, or **unknown**.
 
-A network traffic analyzer that captures and analyzes cryptographic information from encrypted protocols including TLS, SSH, IPsec, WireGuard, DTLS, QUIC, and more. **Identifies post-quantum secure connections.**
+> **Status: pre-alpha.** Public protocols and CLI flags may change.
 
-## Features
+## Install
 
-### Monitored Encrypted Protocols (Default Mode)
-
-- **TLS/HTTPS** (TCP 443) - ClientHello/ServerHello handshakes, cipher suites, SNI
-- **SSH** (TCP 22) - Protocol exchange, version banners
-- **IPsec/IKE** (UDP 500, 4500) - Key exchange negotiation
-- **WireGuard** (UDP 51820) - Modern VPN handshakes
-- **DTLS** (UDP, various) - TLS over UDP (WebRTC, VPN)
-- **QUIC/HTTP3** (UDP 443) - Modern encrypted web protocol
-- **DNS over TLS** (TCP 853) - Encrypted DNS
-- **STARTTLS** - SMTP, IMAP, POP3, FTP, LDAP, XMPP, PostgreSQL, MySQL
-- **SMB** (TCP 445) - File sharing with encryption
-- **LDAPS** (TCP 636) - LDAP over SSL
-- **IMAPS/POP3S** (TCP 993, 995) - Encrypted email
-- **FTPS** (TCP 989, 990) - FTP over TLS
-- **MQTT over TLS** (TCP 8883) - IoT messaging
-- **SIP over TLS** (TCP 5061) - VoIP signaling
-
-### Post-Quantum Security Analysis
-
-Each connection is analyzed to determine quantum resistance:
-
-- **✅ Post-Quantum Secure** - Uses PQ-safe algorithms (Kyber, NTRU, Dilithium, etc.)
-- **🔐 Hybrid** - Mix of post-quantum and classical algorithms (transitional)
-- **⚠️ Classical Crypto** - Uses only classical algorithms (RSA, ECDH, DH) - vulnerable to quantum attacks
-- **❓ Unknown** - Cannot determine security level
-
-### What It Captures
-
-**TLS/DTLS:**
-- Protocol versions (SSL 3.0, TLS 1.0-1.3, DTLS 1.0-1.3)
-- Cipher suites offered and selected
-- Key exchange groups (x25519, Kyber768, secp256r1, etc.)
-- Server Name Indication (SNI)
-- TLS extensions
-- Post-quantum indicators
-
-**SSH:**
-- Protocol version (1.x, 2.0)
-- Software version and implementation
-- Post-quantum SSH detection
-
-**IPsec/IKE:**
-- IKE version (IKEv1, IKEv2)
-- Key exchange proposals
-- Encryption algorithms
-- DH groups
-
-**WireGuard:**
-- Handshake initiation/response
-- Message types
-- Crypto algorithms (Curve25519, ChaCha20-Poly1305)
-
-**QUIC:**
-- QUIC version
-- Initial packets
-- TLS 1.3 integration
-
-**Other Protocols:**
-- STARTTLS upgrade detection
-- SMB dialect negotiation
-- Protocol-specific details
-
-### Output Formats
-
-**Screen (Real-time):**
-- Pretty formatted with color indicators
-- Post-quantum security status highlighted
-- Connection details, crypto algorithms, key information
-
-**JSON Log (quantum-sniffer.json):**
-- Complete structured data
-- Machine-readable format
-- All captured fields preserved
-- Includes `post_quantum_secure` field
-
-## Installation
-
-### Requirements
-- Python 3.6+
-- scapy library
-- Root privileges (packet capture)
-
-### Install Dependencies
+From source (until published to PyPI):
 
 ```bash
-cd ~/quantum-sniffer
-pip3 install -r requirements.txt
+git clone https://github.com/jfrancis/quantum-sniffer.git
+cd quantum-sniffer
+pip install .
+# or, for development with editable install + tests:
+pip install -e '.[dev]'
 ```
 
-Or:
+Requirements: Python 3.9+, `scapy`. `cryptography` is optional and unlocks
+QUIC Initial-packet decryption.
+
+After install, the `quantum-sniffer` console script is on `$PATH`. If
+you'd rather not install, every example below works with
+`python3 -m quantum_sniffer …` from the repo root.
+
+## Quick reference
+
 ```bash
-pip3 install scapy
+quantum-sniffer --help                            # show all flags
+sudo quantum-sniffer -o capture.jsonl -i eth0     # live capture (root required)
+quantum-sniffer -o capture.jsonl -r some.pcap     # replay a saved pcap (no root)
+quantum-sniffer --find-sarah-connor capture.jsonl # Skynet-readiness report
 ```
 
 ## Usage
 
-### Basic Usage (Encrypted Only)
+### Live capture
 
 ```bash
-sudo ./quantum-sniffer.py
+sudo quantum-sniffer -o capture.jsonl -i eth0
 ```
 
-Monitors encrypted protocols on the default interface.
+Live mode requires root (or `cap_net_raw` on Linux: `sudo setcap
+cap_net_raw+ep $(readlink -f $(which python3))`).
 
-### Monitor All Protocols
+### Replay a saved pcap
+
+No root needed — useful for regression testing and analyzing captures
+collected elsewhere.
 
 ```bash
-sudo ./quantum-sniffer.py --all
+quantum-sniffer -o capture.jsonl -r some.pcap
 ```
 
-Includes unencrypted protocols (HTTP, DNS, etc.).
+### Flags
 
-### Specify Interface
+Required for capture/replay modes:
+
+- `-o, --output PATH` — JSONL log file (one event per line, appended).
+  Not required when only running `--find-sarah-connor`.
+
+Common flags:
+
+- `-i, --interface IFACE` — capture interface (default: scapy's default)
+- `-r, --read FILE.pcap` — analyze a saved capture instead of going live
+- `-a, --all` — include unencrypted protocols (HTTP, plain DNS, etc.)
+- `--bpf "tcp port 443"` — override the built-in BPF filter
+- `--host 10.0.0.5` — narrow whichever filter is in effect to one host
+- `-q, --quiet` — write JSONL without printing each event to the console
+- `--debug` — re-raise analyzer exceptions instead of logging them
+- `--find-sarah-connor CAPTURE.jsonl` — see "Skynet readiness report" below
+- `--with-skull` — adds an ASCII skull to the readiness report
+
+`--interface` and `--read` are mutually exclusive.
+
+## Post-Quantum Classification
+
+Each event carries a `post_quantum_secure` field:
+
+| Status    | Meaning                                                              |
+|-----------|----------------------------------------------------------------------|
+| `Yes`     | Pure post-quantum KEX/signature confirmed                            |
+| `Hybrid`  | Mix of PQ and classical (transition deployment)                      |
+| `No`      | Classical only — vulnerable to harvest-now-decrypt-later             |
+| `Unknown` | Couldn't determine from observable handshake bytes                   |
+
+Classification is driven from explicit `(group_id -> classification)` tables
+(`quantum_sniffer/pq.py`), not substring matching, so novel hybrid names
+can't be silently misclassified.
+
+PQ algorithms tracked include CRYSTALS-Kyber (and the standardized name
+ML-KEM), x25519/x448 hybrids, sntrup761x25519 (OpenSSH), and IKEv2 ML-KEM
+DH groups (transform IDs 35–37).
+
+## Output Format
+
+JSON Lines, one event per line. Append-only — safe for long-running
+captures (the previous JSON-array format rewrote the entire file on every
+packet, which became O(N²) and dropped traffic on busy links).
+
+```jsonl
+{"protocol":"TLS","type":"TLS ClientHello","timestamp":"2026-06-10T12:34:56.789",...}
+{"protocol":"WireGuard","type":"WireGuard Handshake Initiation",...}
+```
+
+To consume:
 
 ```bash
-sudo ./quantum-sniffer.py eth0
-sudo ./quantum-sniffer.py -i wlan0
+# As a single JSON array
+jq -s . capture.jsonl
+
+# Filter line-by-line
+jq -c 'select(.post_quantum_secure == "Hybrid")' capture.jsonl
+
+# Quantum readiness summary
+jq -s 'group_by(.post_quantum_secure) | map({status: .[0].post_quantum_secure, count: length})' capture.jsonl
+
+# CSV export
+jq -r '[.timestamp, .protocol, .post_quantum_secure, .connection,
+        .tls_version // .ssh_protocol_version, .selected_cipher.name // "-"]
+       | @csv' capture.jsonl > report.csv
 ```
 
-### All Options
+## What Gets Captured
+
+**TLS / DTLS / QUIC**: protocol versions, cipher suites, key exchange
+groups (including PQ groups like `x25519kyber768`), SNI, ALPN, ECH presence,
+session resumption flags. QUIC Initial packets are decrypted when
+`cryptography` is installed, exposing the inner TLS 1.3 ClientHello.
+
+**SSH**: banner version, then KEXINIT — full algorithm negotiation lists
+(KEX, host-key, encryption, MAC).
+
+**IPsec/IKEv2**: SA proposals walked end-to-end, including PQ DH transform
+IDs (ML-KEM-512/768/1024).
+
+**WireGuard**: handshake message types and sizes; oversized handshakes
+flag possible experimental PQ variants.
+
+**Other**: STARTTLS upgrades, SMB dialect, RDP/CredSSP negotiation,
+Kerberos etypes, SNMPv3 security level, OpenVPN control packets, RADIUS
+codes + EAP method, AMQP banner, SIP/SIPS, ZRTP key agreement, BGP/BGP-
+over-TLS, OPC-UA security policies, and a heuristic TLS detector for ~30
+non-standard ports plus Tor (9001/9030/9050/9051/9150).
+
+## Skynet readiness report
+
+`--find-sarah-connor` reads a JSONL capture and reports how much of the
+traffic would be readable by a sufficiently large quantum computer — i.e.,
+the harvest-now-decrypt-later exposure surface, in Terminator drag.
 
 ```bash
-sudo ./quantum-sniffer.py -a -i eth0        # All protocols on eth0
+quantum-sniffer --find-sarah-connor capture.jsonl
+quantum-sniffer --find-sarah-connor capture.jsonl --with-skull
 ```
 
-### Command-Line Arguments
+You get:
 
-```
--a, --all           Include unencrypted protocols
--i, --interface     Specify network interface
--h, --help          Show help message
-```
+- Counts and percentages by classification (classical / hybrid / PQ /
+  unknown)
+- A ranked list of "high-value targets" — SNIs/IPs whose sessions were
+  classical-only
+- Per-protocol breakdown (TLS / WireGuard / SSH / …)
+- A verdict that scales with the data ("JUDGMENT DAY IS INEVITABLE" all
+  the way up to "HASTA LA VISTA, BABY")
 
-## Example Output
-
-### Screen Output
-
-```
-================================================================================
-[2026-04-05T12:34:56.789] TLS ClientHello
-Post-Quantum: 🔐 HYBRID (PQ + Classical)
-================================================================================
-Connection: 10.1.1.100:54321 -> 93.184.216.34:443
-Direction:  outbound
-Protocol:   TLS
-TLS Version: TLS 1.3 (0x0304)
-Server Name (SNI): example.com
-
-Client Offered Ciphers (15):
-  1. TLS_AES_128_GCM_SHA256 (0x1301)
-  2. TLS_AES_256_GCM_SHA384 (0x1302)
-  3. TLS_CHACHA20_POLY1305_SHA256 (0x1303)
-  ...
-
-Supported Key Exchange Groups:
-  - x25519kyber768 ⭐ [POST-QUANTUM]
-  - x25519
-  - secp256r1
-  - secp384r1
-================================================================================
-
-================================================================================
-[2026-04-05T12:35:01.123] WireGuard Handshake Initiation
-Post-Quantum: ⚠️  CLASSICAL CRYPTO (quantum-vulnerable)
-================================================================================
-Connection: 10.1.1.100:51820 -> 10.1.1.200:51820
-Direction:  outbound
-Protocol:   WireGuard
-Message Type: Handshake Initiation
-Crypto: Curve25519, ChaCha20-Poly1305
-================================================================================
-```
-
-### JSON Log (quantum-sniffer.json)
-
-```json
-[
-  {
-    "protocol": "TLS",
-    "type": "TLS ClientHello",
-    "timestamp": "2026-04-05T12:34:56.789",
-    "src_ip": "10.1.1.100",
-    "src_port": 54321,
-    "dst_ip": "93.184.216.34",
-    "dst_port": 443,
-    "connection": "10.1.1.100:54321 -> 93.184.216.34:443",
-    "direction": "outbound",
-    "encrypted": true,
-    "tls_version": "TLS 1.3",
-    "server_name": "example.com",
-    "client_cipher_suites": [...],
-    "supported_groups": ["x25519kyber768", "x25519", "secp256r1"],
-    "post_quantum_secure": "Hybrid"
-  },
-  {
-    "protocol": "WireGuard",
-    "type": "WireGuard Handshake Initiation",
-    "timestamp": "2026-04-05T12:35:01.123",
-    "src_ip": "10.1.1.100",
-    "src_port": 51820,
-    "dst_ip": "10.1.1.200",
-    "dst_port": 51820,
-    "connection": "10.1.1.100:51820 -> 10.1.1.200:51820",
-    "direction": "outbound",
-    "encrypted": true,
-    "message_type": "Handshake Initiation",
-    "crypto_algorithms": "Curve25519, ChaCha20-Poly1305",
-    "post_quantum_secure": "No"
-  }
-]
-```
-
-## Post-Quantum Cryptography
-
-### What Is Post-Quantum Crypto?
-
-Quantum computers can break current public-key cryptography (RSA, ECDH, DH) using Shor's algorithm. Post-quantum cryptography uses algorithms resistant to quantum attacks.
-
-### PQ-Safe Algorithms Detected
-
-**Key Exchange:**
-- Kyber (CRYSTALS-Kyber) - NIST standard
-- NTRU
-- FrodoKEM
-- Hybrid schemes (e.g., x25519kyber768)
-
-**Signatures:**
-- Dilithium (CRYSTALS-Dilithium)
-- Falcon
-- SPHINCS+
-
-### Classical Algorithms (Quantum-Vulnerable)
-
-**Key Exchange:**
-- RSA
-- Diffie-Hellman (DH)
-- Elliptic Curve Diffie-Hellman (ECDH)
-- x25519, x448, secp256r1, etc.
-
-**Signatures:**
-- RSA signatures
-- ECDSA
-- DSA
-
-### Hybrid Approach
-
-Many systems use hybrid key exchange:
-- Classical algorithm (e.g., x25519) + PQ algorithm (e.g., Kyber768)
-- Protects against both current attacks and future quantum attacks
-- Transitional approach during PQ migration
-
-## Security Analysis Use Cases
-
-### 1. Audit Quantum Readiness
-
-Find systems using only classical crypto:
-```bash
-jq '.[] | select(.post_quantum_secure == "No")' quantum-sniffer.json
-```
-
-### 2. Identify Weak Crypto
-
-Find deprecated TLS versions:
-```bash
-jq '.[] | select(.tls_version == "TLS 1.0" or .tls_version == "TLS 1.1")' quantum-sniffer.json
-```
-
-Find weak ciphers:
-```bash
-jq '.[] | select(.selected_cipher.name | contains("RC4") or contains("DES") or contains("MD5"))' quantum-sniffer.json
-```
-
-### 3. Monitor Protocol Usage
-
-Count protocols:
-```bash
-jq 'group_by(.protocol) | map({protocol: .[0].protocol, count: length})' quantum-sniffer.json
-```
-
-### 4. Track PQ Adoption
-
-Post-quantum security summary:
-```bash
-jq 'group_by(.post_quantum_secure) | map({status: .[0].post_quantum_secure, count: length})' quantum-sniffer.json
-```
-
-### 5. Verify Forward Secrecy
-
-Check for RSA key exchange (no forward secrecy):
-```bash
-jq '.[] | select(.selected_cipher.name | contains("RSA_WITH"))' quantum-sniffer.json
-```
-
-## Viewing Results
-
-### Pretty Print
-
-```bash
-cat quantum-sniffer.json | jq .
-```
-
-### Count Captures
-
-```bash
-jq 'length' quantum-sniffer.json
-```
-
-### Filter by Protocol
-
-```bash
-jq '.[] | select(.protocol == "TLS")' quantum-sniffer.json
-jq '.[] | select(.protocol == "WireGuard")' quantum-sniffer.json
-jq '.[] | select(.protocol == "SSH")' quantum-sniffer.json
-```
-
-### Extract Server Names
-
-```bash
-jq '.[] | select(.server_name) | .server_name' quantum-sniffer.json | sort -u
-```
-
-### Show Selected Ciphers
-
-```bash
-jq '.[] | select(.selected_cipher) | .selected_cipher.name' quantum-sniffer.json | sort | uniq -c
-```
-
-### Find PQ-Secure Connections
-
-```bash
-jq '.[] | select(.post_quantum_secure == "Yes" or .post_quantum_secure == "Hybrid")' quantum-sniffer.json
-```
-
-### Export to CSV
-
-```bash
-jq -r '.[] | [.timestamp, .protocol, .post_quantum_secure, .connection, .tls_version // .ssh_protocol_version, .selected_cipher.name // "-"] | @csv' quantum-sniffer.json > report.csv
-```
+This mode does not require `--output` and does no packet capture.
 
 ## Testing
 
-### Generate Test Traffic
-
 ```bash
-# Terminal 1: Start sniffer
-sudo ./quantum-sniffer.py
-
-# Terminal 2: Generate traffic
-curl https://example.com
-curl https://google.com
-ssh user@host
-ping 8.8.8.8  # ICMP (if --all mode)
+python3 -m pytest tests/
 ```
 
-### Test with WireGuard
+38 tests cover the bounds-check fixes in the raw TLS parser (truncated
+session-id / cipher-list / extensions don't crash), PQ classification,
+SSH KEX parsing, IKEv2 SA parsing (including ML-KEM transform IDs), the
+JSONL writer, CLI argument handling, and the Skynet report.
 
-If you have WireGuard configured:
+## Building for PyPI
+
+The repo ships `pyproject.toml` and `MANIFEST.in`, so:
+
 ```bash
-sudo wg-quick up wg0
-# quantum-sniffer will capture the handshake
-```
-
-### Test with OpenVPN
-
-```bash
-sudo openvpn client.conf
-# quantum-sniffer will capture TLS handshake
+pip install --user build twine
+python3 -m build              # produces dist/*.whl + dist/*.tar.gz
+python3 -m twine check dist/* # validates README + metadata
+# python3 -m twine upload dist/*    # uncomment to actually publish
 ```
 
 ## Limitations
 
-- **Cannot decrypt traffic** - Only analyzes handshakes and metadata
-- **PQ detection limitations** - Relies on recognizing known PQ algorithm names
-- **Protocol coverage** - Covers major protocols, but not all possible encrypted protocols
-- **Performance** - Processing many packets may impact system performance
-- **False positives** - Some heuristics for protocol detection may occasionally misidentify packets
+- Cannot decrypt application traffic — handshake metadata only.
+- ClientHello fragmentation across TCP segments is detected and flagged
+  but not yet reassembled. PQ key shares often push ClientHello past one
+  segment, so flagged events deserve attention.
+- PQ detection only catches algorithms whose IDs/names this tool knows
+  about. New IANA assignments need updates to `quantum_sniffer/constants.py`
+  and `quantum_sniffer/pq.py`.
 
-## Troubleshooting
+## Legal
 
-### No packets captured
-
-```bash
-# Check interface
-ip link show
-
-# Generate traffic
-curl https://example.com
-
-# Try specific interface
-sudo ./quantum-sniffer.py -i eth0
-```
-
-### Permission denied
-
-```bash
-# Use sudo
-sudo ./quantum-sniffer.py
-```
-
-### Scapy not installed
-
-```bash
-pip3 install scapy
-```
-
-### Too many packets
-
-```bash
-# Filter by specific IP
-# Edit quantum-sniffer.py, add to filter_str:
-"and host 10.1.1.100"
-```
-
-## Legal Notice
-
-**Authorized Use Only:**
-- Your own networks
-- Networks with explicit written permission
-- Authorized security assessments
-- Educational purposes in controlled environments
-
-**Unauthorized network monitoring may violate:**
-- Computer Fraud and Abuse Act (USA)
-- Similar laws in other jurisdictions
-- Privacy regulations (GDPR, etc.)
-- Corporate policies
-
-Use responsibly and legally.
-
-## Future Enhancements
-
-Potential additions:
-- Full IKE proposal parsing
-- Certificate extraction
-- PCAP file analysis mode
-- Real-time alerting (weak crypto detection)
-- Database backend for long-term storage
-- Web dashboard
-- Machine learning for anomaly detection
-
-## References
-
-### Post-Quantum Cryptography
-- NIST PQ Standardization: https://csrc.nist.gov/projects/post-quantum-cryptography
-- Kyber: https://pq-crystals.org/kyber/
-- Dilithium: https://pq-crystals.org/dilithium/
-
-### Protocols
-- TLS 1.3: RFC 8446
-- IKEv2: RFC 7296
-- WireGuard: https://www.wireguard.com/protocol/
-- QUIC: RFC 9000
-
-### Tools
-- Scapy: https://scapy.net/
-
-## Support
-
-For issues or questions:
-- Check QUICKSTART.md for common examples
-- Review documentation in ~/quantum-sniffer/
-
-Enjoy quantum-safe network analysis! 🔐
+Authorized use only. Monitoring networks you don't own or lack written
+permission to monitor likely violates the Computer Fraud and Abuse Act
+(US), GDPR (EU), or similar laws elsewhere.
 
 ## License
 
-[GNU General Public License v3.0](LICENSE)
+GNU General Public License v3.0

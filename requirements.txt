@@ -1,3 +1,0 @@
-# Core requirements for quantum-sniffer.py
-scapy>=2.4.5
-cryptography>=42.0.0  # Optional: enables QUIC Initial packet decryption

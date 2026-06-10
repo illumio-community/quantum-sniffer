@@ -1,0 +1,8 @@
+include README.md
+include LICENSE
+include pyproject.toml
+recursive-include quantum_sniffer *.py
+recursive-include tests *.py
+exclude requirements.txt
+prune add-ons
+prune stinky
