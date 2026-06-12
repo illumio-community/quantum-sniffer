@@ -30,9 +30,9 @@ you'd rather not install, every example below works with
 ## Quick reference
 
 ```bash
-quantum-sniffer --help                            # show all flags
-sudo quantum-sniffer -o capture.jsonl -i eth0     # live capture (root required)
-quantum-sniffer -o capture.jsonl -r some.pcap     # replay a saved pcap (no root)
+quantum-sniffer --help                        # show all flags
+sudo quantum-sniffer -o capture -i eth0       # live capture (creates .csv + .jsonl)
+quantum-sniffer -o capture -r some.pcap       # replay a saved pcap (no root)
 quantum-sniffer --find-sarah-connor capture.jsonl # Skynet-readiness report
 ```
 
@@ -41,8 +41,12 @@ quantum-sniffer --find-sarah-connor capture.jsonl # Skynet-readiness report
 ### Live capture
 
 ```bash
-sudo quantum-sniffer -o capture.jsonl -i eth0
+sudo quantum-sniffer -o capture -i eth0
 ```
+
+This creates **two files**:
+- `capture.csv` — flattened data (17 columns) for spreadsheet analysis
+- `capture.jsonl` — complete event data with nested structures
 
 Live mode requires root (or `cap_net_raw` on Linux: `sudo setcap
 cap_net_raw+ep $(readlink -f $(which python3))`).
@@ -53,15 +57,16 @@ No root needed — useful for regression testing and analyzing captures
 collected elsewhere.
 
 ```bash
-quantum-sniffer -o capture.jsonl -r some.pcap
+quantum-sniffer -o capture -r some.pcap
 ```
 
 ### Flags
 
-Required for capture/replay modes:
+Optional for capture/replay modes:
 
-- `-o, --output PATH` — JSONL log file (one event per line, appended).
-  Not required when only running `--find-sarah-connor`.
+- `-o, --output PATH` — base filename for output logs (extensions `.csv` 
+  and `.jsonl` added automatically). Defaults to `quantum-log` if not specified.
+  Not used by `--find-sarah-connor`.
 
 Common flags:
 
@@ -98,12 +103,33 @@ DH groups (transform IDs 35–37).
 
 ## Output Format
 
-JSON Lines, one event per line. Append-only — safe for long-running
-captures (the previous JSON-array format rewrote the entire file on every
-packet, which became O(N²) and dropped traffic on busy links).
+Quantum-sniffer writes **dual output** to both CSV and JSONL formats simultaneously:
+
+### CSV Format
+
+Spreadsheet-friendly with 17 core columns:
+- `timestamp`, `protocol`, `type`, `post_quantum_secure`
+- `src_ip`, `src_port`, `dst_ip`, `dst_port`, `connection`, `direction`
+- `encrypted`, `tls_version`, `server_name`, `selected_cipher_name`
+- `ssh_banner`, `application`, `note`
+
+Perfect for filtering/sorting in Excel, LibreOffice Calc, or `csvkit`.
+
+```bash
+# Quick analysis in spreadsheet
+libreoffice capture.csv
+
+# Command-line filtering
+csvgrep -c post_quantum_secure -m "No" capture.csv | csvlook
+```
+
+### JSONL Format
+
+Complete event data with nested structures. One JSON object per line, 
+append-only — safe for long-running captures.
 
 ```jsonl
-{"protocol":"TLS","type":"TLS ClientHello","timestamp":"2026-06-10T12:34:56.789",...}
+{"protocol":"TLS","type":"TLS ClientHello","timestamp":"2026-06-10T12:34:56.789",...,"supported_groups":["x25519kyber768","x25519"],...}
 {"protocol":"WireGuard","type":"WireGuard Handshake Initiation",...}
 ```
 
@@ -119,10 +145,8 @@ jq -c 'select(.post_quantum_secure == "Hybrid")' capture.jsonl
 # Quantum readiness summary
 jq -s 'group_by(.post_quantum_secure) | map({status: .[0].post_quantum_secure, count: length})' capture.jsonl
 
-# CSV export
-jq -r '[.timestamp, .protocol, .post_quantum_secure, .connection,
-        .tls_version // .ssh_protocol_version, .selected_cipher.name // "-"]
-       | @csv' capture.jsonl > report.csv
+# Extract specific fields
+jq -r '[.timestamp, .protocol, .supported_groups[]] | @csv' capture.jsonl
 ```
 
 ## What Gets Captured
@@ -176,10 +200,10 @@ This mode does not require `--output` and does no packet capture.
 python3 -m pytest tests/
 ```
 
-38 tests cover the bounds-check fixes in the raw TLS parser (truncated
+45 tests cover the bounds-check fixes in the raw TLS parser (truncated
 session-id / cipher-list / extensions don't crash), PQ classification,
 SSH KEX parsing, IKEv2 SA parsing (including ML-KEM transform IDs), the
-JSONL writer, CLI argument handling, and the Skynet report.
+dual CSV/JSONL writer, CLI argument handling, and the Skynet report.
 
 ## Building for PyPI
 

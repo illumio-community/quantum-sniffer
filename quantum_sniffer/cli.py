@@ -6,7 +6,7 @@ import os
 import sys
 import warnings
 
-from .output import JsonlWriter
+from .output import DualWriter
 from .sniffer import Sniffer
 
 
@@ -67,8 +67,9 @@ def build_parser():
         description="quantum-sniffer — post-quantum-aware network handshake inspector",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Output format: JSON Lines (one event per line, append-only). Use jq -s to
-parse as a single array, or jq -c to filter line-by-line.
+Output format: Dual output to both CSV and JSONL files. JSONL contains complete
+event data (use jq -s for array or jq -c for line filtering). CSV contains
+flattened records with core fields for spreadsheet analysis.
 
 PCAP mode: -r/--read takes a .pcap or .pcapng file and runs all analyzers
 offline. Useful for regression testing and replaying captures.
@@ -85,8 +86,9 @@ Post-quantum classification:
     )
     parser.add_argument(
         "-o", "--output",
-        help="JSONL log file (one event per line, appended). Required for "
-             "live capture and PCAP-replay; ignored by --find-sarah-connor.",
+        help="Base filename for output logs (writes both .csv and .jsonl). "
+             "Extensions are added automatically. Defaults to 'quantum-log' if not specified. "
+             "Ignored by --find-sarah-connor.",
     )
     parser.add_argument(
         "-i", "--interface",
@@ -138,10 +140,11 @@ def main(argv=None):
         skynet.run(args.find_sarah_connor, show_skull=args.with_skull)
         return 0
 
-    if not args.output:
-        parser.error("-o/--output is required for capture mode")
     if args.interface and args.read:
         parser.error("--interface and --read are mutually exclusive")
+
+    # Default output name if not specified
+    output_base = args.output if args.output else "quantum-log"
 
     encrypted_only = not args.all
     if args.bpf:
@@ -151,11 +154,11 @@ def main(argv=None):
     if args.host:
         bpf = f"({bpf}) and host {args.host}"
 
-    writer = JsonlWriter(args.output)
+    writer = DualWriter(output_base)
     sniffer = Sniffer(writer, encrypted_only=encrypted_only, debug=args.debug, quiet=args.quiet)
 
     print(f"[*] quantum-sniffer")
-    print(f"[*] Output:    {args.output}")
+    print(f"[*] Output:    {writer.csv_path} + {writer.jsonl_path}")
     print(f"[*] Mode:      {'encrypted only' if encrypted_only else 'all protocols'}")
     if args.read:
         print(f"[*] Reading:   {args.read}")
@@ -194,7 +197,8 @@ def main(argv=None):
     writer.close()
     summary = sniffer.summary()
     print(f"\n[*] Captured {summary['events']} events")
-    print(f"[*] Log:     {args.output}")
+    print(f"[*] CSV:     {writer.csv_path}")
+    print(f"[*] JSONL:   {writer.jsonl_path}")
     if summary["events"]:
         print("\n[*] Protocols:")
         for p, cnt in summary["protocols"].items():

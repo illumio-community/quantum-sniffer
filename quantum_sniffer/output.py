@@ -1,6 +1,8 @@
 """Output formatters: pretty console output and JSONL append-only logging."""
 
+import csv
 import json
+import os
 import sys
 
 from .constants import TOR_PORTS
@@ -13,6 +15,67 @@ PQ_LABEL = {
 }
 
 
+class DualWriter:
+    """Writes events to both CSV and JSONL formats simultaneously."""
+
+    # CSV column order - covers the most common fields
+    CSV_FIELDS = [
+        "timestamp", "protocol", "type", "post_quantum_secure",
+        "src_ip", "src_port", "dst_ip", "dst_port",
+        "connection", "direction", "encrypted",
+        "tls_version", "server_name", "selected_cipher_name",
+        "ssh_banner", "application", "note"
+    ]
+
+    def __init__(self, base_path):
+        """Initialize dual writer with base path (extensions will be added)."""
+        # Strip any extension from the base path
+        base = os.path.splitext(base_path)[0]
+        if base.endswith('.json'):
+            base = base[:-5]  # Handle .jsonl -> .json.l edge case
+
+        self.jsonl_path = f"{base}.jsonl"
+        self.csv_path = f"{base}.csv"
+
+        # Open JSONL file in append mode
+        self._jsonl_fh = open(self.jsonl_path, "a", buffering=1)
+
+        # Open CSV file - write header if new file
+        csv_exists = os.path.exists(self.csv_path) and os.path.getsize(self.csv_path) > 0
+        self._csv_fh = open(self.csv_path, "a", buffering=1, newline='')
+        self._csv_writer = csv.DictWriter(
+            self._csv_fh,
+            fieldnames=self.CSV_FIELDS,
+            extrasaction='ignore'  # Silently drop fields not in CSV_FIELDS
+        )
+        if not csv_exists:
+            self._csv_writer.writeheader()
+
+    def write(self, info):
+        """Write one event to both JSONL and CSV."""
+        # Write JSONL (complete data)
+        json.dump(info, self._jsonl_fh, separators=(",", ":"))
+        self._jsonl_fh.write("\n")
+
+        # Write CSV (flattened/simplified data)
+        csv_row = dict(info)  # Shallow copy
+
+        # Flatten selected_cipher if present
+        if "selected_cipher" in info and isinstance(info["selected_cipher"], dict):
+            csv_row["selected_cipher_name"] = info["selected_cipher"].get("name", "")
+
+        self._csv_writer.writerow(csv_row)
+
+    def close(self):
+        """Close both output files."""
+        for fh in (self._jsonl_fh, self._csv_fh):
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+
+# Keep JsonlWriter for backward compatibility with tests
 class JsonlWriter:
     """Append one JSON object per line. Flushes on every write."""
 
