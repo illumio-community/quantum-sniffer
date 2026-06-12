@@ -10,13 +10,20 @@ ZRTP, BGP, OPC-UA, and more) and tags each one as **post-quantum secure**,
 
 ## Install
 
-From source (until published to PyPI):
+**From PyPI** (recommended):
 
 ```bash
-git clone https://github.com/jfrancis/quantum-sniffer.git
+pip install quantum-sniffer
+
+# To upgrade an existing installation:
+pip install --upgrade quantum-sniffer
+```
+
+**From source** (for development):
+
+```bash
+git clone https://github.com/illumio-community/quantum-sniffer.git
 cd quantum-sniffer
-pip install .
-# or, for development with editable install + tests:
 pip install -e '.[dev]'
 ```
 
