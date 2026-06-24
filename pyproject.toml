@@ -1,13 +1,12 @@
 [build-system]
-requires = ["hatchling>=1.18"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "quantum-sniffer"
 version = "0.4.0"
 description = "Post-quantum-aware network handshake inspector for TLS, SSH, IKE, QUIC, WireGuard, and more"
 readme = "README.md"
-license = "GPL-3.0-or-later"
 requires-python = ">=3.9"
 authors = [{ name = "quantum-sniffer authors" }]
 keywords = [
@@ -56,18 +55,6 @@ quantum-sniffer = "quantum_sniffer.cli.app:main"
 [project.urls]
 Homepage  = "https://github.com/illumio-community/quantum-sniffer"
 Issues    = "https://github.com/illumio-community/quantum-sniffer/issues"
-
-[tool.hatch.build.targets.sdist]
-include = [
-    "quantum_sniffer/",
-    "tests/",
-    "README.md",
-    "LICENSE",
-    "pyproject.toml",
-]
-
-[tool.hatch.build.targets.wheel]
-packages = ["quantum_sniffer"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
