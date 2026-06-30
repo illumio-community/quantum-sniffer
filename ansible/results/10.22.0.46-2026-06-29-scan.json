@@ -1,0 +1,80 @@
+{
+  "metadata": {
+    "scan_info": {
+      "source_hostname": "ben-vm-1",
+      "source_ip": "10.2.140.99",
+      "target": "10.22.0.46",
+      "ports_scanned": [
+        22,
+        443,
+        3389
+      ],
+      "timeout_seconds": 5.0,
+      "command_line": "/tmp/quantum-sniffer-1782748057-10.22.0.46/quantum_sniffer/__main__.py --probe 10.22.0.46 --ports 22,443,3389 --output-json /tmp/quantum-sniffer-1782748057-10.22.0.46/scan-results.json --output-markdown /tmp/quantum-sniffer-1782748057-10.22.0.46/scan-results.md --timeout 5 --workers 10"
+    },
+    "timing": {
+      "start_time": "2026-06-29T15:48:24.732881",
+      "end_time": "2026-06-29T15:48:24.817273",
+      "duration_seconds": 0.084
+    }
+  },
+  "summary": {
+    "total_ports_scanned": 3,
+    "open_ports": 1,
+    "closed_ports": 2,
+    "filtered_ports": 0,
+    "timeout_ports": 0,
+    "error_ports": 0,
+    "pq_capable_ports": 1
+  },
+  "results": [
+    {
+      "target_ip": "10.22.0.46",
+      "target_port": 22,
+      "protocol": "ssh",
+      "status": "open",
+      "tls_version": null,
+      "cipher_suite": null,
+      "key_exchange_group": null,
+      "server_name": null,
+      "post_quantum_secure": "Hybrid",
+      "supported_groups": [],
+      "alpn_protocols": [],
+      "ssh_banner": "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.16",
+      "ssh_kex_algorithms": [
+        "sntrup761x25519-sha512@openssh.com",
+        "curve25519-sha256",
+        "curve25519-sha256@libssh.org",
+        "ecdh-sha2-nistp256",
+        "ecdh-sha2-nistp384",
+        "ecdh-sha2-nistp521",
+        "diffie-hellman-group-exchange-sha256",
+        "diffie-hellman-group16-sha512",
+        "diffie-hellman-group18-sha512",
+        "diffie-hellman-group14-sha256",
+        "ext-info-s",
+        "kex-strict-s-v00@openssh.com"
+      ],
+      "probe_duration_ms": 39.43,
+      "timestamp": "2026-06-29T15:48:24.733211"
+    },
+    {
+      "target_ip": "10.22.0.46",
+      "target_port": 3389,
+      "protocol": "tls",
+      "status": "closed",
+      "error_message": "Connection refused",
+      "probe_duration_ms": 78.96,
+      "timestamp": "2026-06-29T15:48:24.736468"
+    },
+    {
+      "target_ip": "10.22.0.46",
+      "target_port": 443,
+      "protocol": "tls",
+      "status": "closed",
+      "error_message": "Connection refused",
+      "probe_duration_ms": 81.37,
+      "timestamp": "2026-06-29T15:48:24.734928"
+    }
+  ]
+}

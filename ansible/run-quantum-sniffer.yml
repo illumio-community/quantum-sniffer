@@ -1,0 +1,223 @@
+---
+# Ansible playbook to run quantum-sniffer on remote hosts without installation
+# Creates temporary environment, runs scan, fetches results, and cleans up
+#
+# Usage:
+#   ansible-playbook -i inventory.ini run-quantum-sniffer.yml
+
+- name: Run quantum-sniffer on remote hosts (temporary installation)
+  hosts: all
+  gather_facts: yes
+  become: no  # Set to yes if passive capture mode needed (requires root)
+
+  vars:
+    # Temporary directory (unique per run)
+    temp_dir: "/tmp/quantum-sniffer-{{ ansible_date_time.epoch }}-{{ inventory_hostname_short }}"
+
+    # Local quantum-sniffer source directory
+    quantum_sniffer_source: "{{ playbook_dir }}/.."
+
+    # Results directory on control machine
+    results_dir: "{{ playbook_dir }}/results"
+
+    # Scan configuration (can be overridden via -e)
+    scan_mode: "probe"  # "probe" or "passive"
+    scan_target: "{{ ansible_default_ipv4.address }}"  # Scan self by default
+    scan_ports: "22,443,3389"
+    scan_timeout: 5
+    scan_workers: 10
+
+    # Output files
+    output_json: "{{ temp_dir }}/scan-results.json"
+    output_markdown: "{{ temp_dir }}/scan-results.md"
+    output_csv: "{{ temp_dir }}/scan-results.csv"
+    output_jsonl: "{{ temp_dir }}/scan-results.jsonl"
+
+  tasks:
+  - block:
+    - name: Check if Python 3 is available
+      command: python3 --version
+      register: python_version
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if Python 3 not found
+      fail:
+        msg: "Python 3 is required but not found on {{ inventory_hostname }}"
+      when: python_version.rc != 0
+
+    - name: Display Python version
+      debug:
+        msg: "Using {{ python_version.stdout }} on {{ inventory_hostname }}"
+
+    - name: Create temporary directory
+      file:
+        path: "{{ temp_dir }}"
+        state: directory
+        mode: '0755'
+      register: temp_dir_created
+
+    - name: Copy quantum-sniffer source to remote
+      synchronize:
+        src: "{{ quantum_sniffer_source }}/"
+        dest: "{{ temp_dir }}/"
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=__pycache__"
+          - "--exclude=*.pyc"
+          - "--exclude=.env"
+          - "--exclude=venv"
+          - "--exclude=scans"
+          - "--exclude=results"
+          - "--exclude=*.pcap"
+          - "--exclude=ansible/results"
+      register: source_copied
+
+    - name: Check if requirements.txt exists
+      stat:
+        path: "{{ temp_dir }}/requirements.txt"
+      register: requirements_file
+
+    - name: Create requirements.txt if missing
+      copy:
+        dest: "{{ temp_dir }}/requirements.txt"
+        content: |
+          scapy>=2.5.0
+          cryptography>=41.0.0
+          python-dotenv>=1.0.0
+        mode: '0644'
+      when: not requirements_file.stat.exists
+
+    - name: Create Python virtual environment
+      command: python3 -m venv "{{ temp_dir }}/venv"
+      args:
+        creates: "{{ temp_dir }}/venv/bin/python3"
+      register: venv_created
+
+    - name: Upgrade pip in virtual environment
+      pip:
+        name: pip
+        state: latest
+        virtualenv: "{{ temp_dir }}/venv"
+      register: pip_upgraded
+
+    - name: Install quantum-sniffer dependencies
+      pip:
+        requirements: "{{ temp_dir }}/requirements.txt"
+        virtualenv: "{{ temp_dir }}/venv"
+      register: deps_installed
+
+    - name: Install quantum-sniffer module in editable mode
+      command: "{{ temp_dir }}/venv/bin/pip3 install -e {{ temp_dir }}"
+      changed_when: true
+
+    - name: Run quantum-sniffer (probe mode)
+      command: >
+        {{ temp_dir }}/venv/bin/python3 -m quantum_sniffer
+        --probe {{ scan_target }}
+        --ports {{ scan_ports }}
+        --output-json {{ output_json }}
+        --output-markdown {{ output_markdown }}
+        --timeout {{ scan_timeout }}
+        --workers {{ scan_workers }}
+      register: scan_result
+      when: scan_mode == "probe"
+      changed_when: true
+
+    - name: Run quantum-sniffer (passive mode)
+      command: >
+        {{ temp_dir }}/venv/bin/python3 -m quantum_sniffer
+        --output {{ temp_dir }}/scan-results
+        --interface {{ ansible_default_ipv4.interface }}
+      register: scan_result_passive
+      when: scan_mode == "passive"
+      become: yes  # Passive capture requires root
+      changed_when: true
+      async: 600  # Run for 10 minutes max
+      poll: 0
+
+    - name: Wait for passive capture (if running)
+      async_status:
+        jid: "{{ scan_result_passive.ansible_job_id }}"
+      register: job_result
+      until: job_result.finished
+      retries: 120
+      delay: 5
+      when: scan_mode == "passive"
+
+    - name: Display scan output
+      debug:
+        var: scan_result.stdout_lines
+      when: scan_mode == "probe" and scan_result.stdout_lines is defined
+
+    - name: Check if results exist
+      stat:
+        path: "{{ item }}"
+      register: result_files
+      loop:
+        - "{{ output_json }}"
+        - "{{ output_markdown }}"
+        - "{{ output_csv }}"
+        - "{{ output_jsonl }}"
+      failed_when: false
+
+    - name: Create results directory on control machine
+      file:
+        path: "{{ results_dir }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: true
+
+    - name: Fetch JSON results
+      fetch:
+        src: "{{ output_json }}"
+        dest: "{{ results_dir }}/{{ inventory_hostname }}-{{ ansible_date_time.date }}-scan.json"
+        flat: yes
+      when: result_files.results[0].stat.exists | default(false)
+
+    - name: Fetch Markdown results
+      fetch:
+        src: "{{ output_markdown }}"
+        dest: "{{ results_dir }}/{{ inventory_hostname }}-{{ ansible_date_time.date }}-scan.md"
+        flat: yes
+      when: result_files.results[1].stat.exists | default(false)
+
+    - name: Fetch CSV results (passive mode)
+      fetch:
+        src: "{{ output_csv }}"
+        dest: "{{ results_dir }}/{{ inventory_hostname }}-{{ ansible_date_time.date }}-scan.csv"
+        flat: yes
+      when: result_files.results[2].stat.exists | default(false)
+
+    - name: Fetch JSONL results (passive mode)
+      fetch:
+        src: "{{ output_jsonl }}"
+        dest: "{{ results_dir }}/{{ inventory_hostname }}-{{ ansible_date_time.date }}-scan.jsonl"
+        flat: yes
+      when: result_files.results[3].stat.exists | default(false)
+
+    - name: Display results location
+      debug:
+        msg: "Results saved to {{ results_dir }}/{{ inventory_hostname }}-{{ ansible_date_time.date }}-scan.*"
+
+    rescue:
+      - name: Report error
+        debug:
+          msg: "Scan failed, but cleanup will still run"
+
+    always:
+      - name: Cleanup - Remove temporary directory
+        file:
+          path: "{{ temp_dir }}"
+          state: absent
+        ignore_errors: yes
+
+      - name: Verify cleanup
+        stat:
+          path: "{{ temp_dir }}"
+        register: cleanup_check
+
+      - name: Report cleanup status
+        debug:
+          msg: "Temporary directory {{ 'successfully removed' if not cleanup_check.stat.exists else 'STILL EXISTS (manual cleanup needed)' }}"
