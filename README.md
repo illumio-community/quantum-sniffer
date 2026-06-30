@@ -115,32 +115,23 @@ quantum-sniffer --probe 192.168.1.1-50 --ports 443 --workers 20
 quantum-sniffer --probe 10.1.1.10,10.1.1.20,10.1.1.30 --ports 22,443
 ```
 
-### Self-Scan (Automated Testing)
+### Automated Monitoring: Two Modes
 
-Self-scan enables each machine to independently test its own PQC readiness. Two modes are supported:
+Quantum-sniffer supports two distinct monitoring approaches:
 
-**Daily Mode** (default - scans once per day):
+#### Mode 1: Daily Active Scanning (`--daily`)
+
+Active scanning with `self-scan.py` - probes services once per day:
+
 ```bash
-# Deploy with daily cron (2 AM)
+# Deploy daily active scanning
 cd quantum-sniffer
-sudo ./deploy-self-scan.sh
+sudo ./deploy-monitor.sh --daily
 
 # Or user-only (no sudo)
-./deploy-self-scan.sh --user-cron
-```
+./deploy-monitor.sh --daily --user-cron
 
-**Persistent Mode** (scans every 15 minutes):
-```bash
-# Deploy with frequent cron
-sudo ./deploy-self-scan.sh --persistent
-
-# Results written every 15 minutes
-watch -n 60 jq '.summary' /var/log/quantum-sniffer/self-scan.json
-```
-
-**Manual Execution:**
-```bash
-# Run manually
+# Manual execution
 ./self-scan.py > today-scan.json
 
 # View results
@@ -148,11 +139,40 @@ jq '.summary' /var/log/quantum-sniffer/self-scan.json
 ```
 
 **What it does:**
-- Discovers services on external interfaces (not localhost)
-- Runs active quantum-sniffer probes (not passive monitoring)
-- Outputs JSON results to `/var/log/quantum-sniffer/self-scan.json`
-- Perfect for fleet-wide deployment
-- Integrates with UPCE for centralized collection and reporting
+- Discovers externally-accessible services (excludes localhost)
+- **Actively probes** each service with `quantum-sniffer --probe`
+- Runs once daily at 2 AM via cron
+- Outputs JSON report to `/var/log/quantum-sniffer/self-scan.json`
+- Suitable for compliance audits and periodic checks
+
+#### Mode 2: Persistent Passive Monitoring (`--persistent`)
+
+Continuous traffic analysis with `persistent-monitor.py` - monitors actual connections:
+
+```bash
+# Deploy persistent passive monitoring
+cd quantum-sniffer
+sudo ./deploy-monitor.sh --persistent
+
+# Check status
+sudo systemctl status quantum-sniffer-monitor@eth0
+
+# View logs
+sudo journalctl -u quantum-sniffer-monitor@eth0 -f
+tail -f /var/log/quantum-sniffer/pqc-monitor-*.jsonl
+```
+
+**What it does:**
+- **Passively captures** live network traffic (no active probing)
+- Analyzes PQC status of real incoming/outgoing connections
+- Runs continuously as a systemd daemon
+- Logs to rolling JSONL files
+- Suitable for real-time monitoring and traffic analysis
+- Integrates with UPCE for centralized collection
+
+**Key Difference:**
+- **Daily mode** = Active probing (like nmap for PQC)
+- **Persistent mode** = Passive monitoring (like tcpdump + analysis)
 
 ### Illumio Integration
 
