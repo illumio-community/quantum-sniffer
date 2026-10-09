@@ -1,5 +1,6 @@
 """Output formatters for probe results."""
 
+import ipaddress
 import json
 import socket
 from datetime import datetime
@@ -177,75 +178,116 @@ def generate_markdown_report(
         lines.append(f"- **PQ-Capable**: {pq_capable}/{open_ports}")
     lines.append("")
 
-    # Results table
-    lines.append("## Results")
+    # Results grouped by host
+    lines.append("## Results by Host")
     lines.append("")
 
-    # Group by status
-    open_results = [r for r in results if r.status == PortStatus.OPEN]
-    closed_results = [r for r in results if r.status == PortStatus.CLOSED]
-    other_results = [r for r in results if r.status not in (PortStatus.OPEN, PortStatus.CLOSED)]
+    # Group results by target IP
+    from collections import defaultdict
+    by_host = defaultdict(list)
+    for r in results:
+        by_host[r.target_ip].append(r)
 
-    # Open ports (detailed)
-    if open_results:
-        lines.append("### Open Ports")
-        lines.append("")
-        lines.append("| Port | Status | TLS Version | Cipher Suite | PQ Status |")
-        lines.append("|------|--------|-------------|--------------|-----------|")
-        for r in open_results:
-            pq_icon = "✓" if r.is_pq_capable else "✗"
-            lines.append(
-                f"| {r.target_port} | {r.status.value} | "
-                f"{r.tls_version or 'N/A'} | "
-                f"{r.cipher_suite or 'N/A'} | "
-                f"{pq_icon} {r.post_quantum_secure or 'Unknown'} |"
-            )
-        lines.append("")
+    # Sort hosts by IP address
+    def _host_key(host):
+        try:
+            addr = ipaddress.ip_address(host)
+            return (0, addr.version, int(addr), "")
+        except ValueError:
+            return (1, 0, 0, host)
 
-    # Closed ports (summary)
-    if closed_results:
-        lines.append("### Closed Ports")
-        lines.append("")
-        closed_ports_str = ", ".join(str(r.target_port) for r in closed_results)
-        lines.append(f"Ports: {closed_ports_str}")
-        lines.append("")
+    sorted_hosts = sorted(by_host.keys(), key=_host_key)
 
-    # Other (filtered, timeout, error)
-    if other_results:
-        lines.append("### Other Results")
+    for host_ip in sorted_hosts:
+        host_results = by_host[host_ip]
+
+        # Count statuses for this host
+        open_count = sum(1 for r in host_results if r.status == PortStatus.OPEN)
+        pq_count = sum(1 for r in host_results if r.status == PortStatus.OPEN and r.is_pq_capable)
+
+        # Host header with summary
+        lines.append(f"### {host_ip}")
         lines.append("")
-        lines.append("| Port | Status | Error |")
-        lines.append("|------|--------|-------|")
-        for r in other_results:
-            error_msg = r.error_message or ""
-            lines.append(f"| {r.target_port} | {r.status.value} | {error_msg} |")
+        lines.append(f"**Open Ports**: {open_count}/{len(host_results)} | **PQ-Capable**: {pq_count}/{open_count if open_count > 0 else 0}")
         lines.append("")
 
-    # Detailed results for open ports
-    if open_results:
-        lines.append("## Detailed Results (Open Ports)")
-        lines.append("")
-        for r in open_results:
-            lines.append(f"### Port {r.target_port}")
+        # Separate by status
+        open_results = [r for r in host_results if r.status == PortStatus.OPEN]
+        closed_results = [r for r in host_results if r.status == PortStatus.CLOSED]
+        other_results = [r for r in host_results if r.status not in (PortStatus.OPEN, PortStatus.CLOSED)]
+
+        # Open ports table
+        if open_results:
+            lines.append("#### Open Ports")
             lines.append("")
-            lines.append(f"- **Status**: {r.status.value}")
-            lines.append(f"- **TLS Version**: {r.tls_version or 'N/A'}")
-            lines.append(f"- **Cipher Suite**: {r.cipher_suite or 'N/A'}")
-            lines.append(f"- **Key Exchange**: {r.key_exchange_group or 'N/A'}")
-            lines.append(f"- **PQ Status**: {r.post_quantum_secure or 'Unknown'}")
-            if r.server_name:
-                lines.append(f"- **Server Name**: {r.server_name}")
-            if r.certificate_info:
-                cert = r.certificate_info
-                lines.append("- **Certificate**:")
-                if 'subject' in cert:
-                    lines.append(f"  - Subject: {cert['subject']}")
-                if 'issuer' in cert:
-                    lines.append(f"  - Issuer: {cert['issuer']}")
-                if 'not_after' in cert:
-                    lines.append(f"  - Expires: {cert['not_after']}")
-            lines.append(f"- **Probe Duration**: {r.probe_duration_ms:.2f}ms")
+            lines.append("| Port | Protocol | TLS Version | Cipher Suite | PQ Status |")
+            lines.append("|------|----------|-------------|--------------|-----------|")
+            for r in sorted(open_results, key=lambda x: x.target_port):
+                pq_icon = "✓" if r.is_pq_capable else "✗"
+                protocol = r.protocol or "unknown"
+                lines.append(
+                    f"| {r.target_port} | {protocol} | "
+                    f"{r.tls_version or 'N/A'} | "
+                    f"{r.cipher_suite or 'N/A'} | "
+                    f"{pq_icon} {r.post_quantum_secure or 'Unknown'} |"
+                )
             lines.append("")
+
+            # Detailed info for each open port
+            for r in sorted(open_results, key=lambda x: x.target_port):
+                lines.append(f"**Port {r.target_port} Details:**")
+                lines.append("")
+                if r.protocol:
+                    lines.append(f"- **Protocol**: {r.protocol}")
+                if r.tls_version:
+                    lines.append(f"- **TLS Version**: {r.tls_version}")
+                if r.cipher_suite:
+                    lines.append(f"- **Cipher Suite**: {r.cipher_suite}")
+                if r.key_exchange_group:
+                    lines.append(f"- **Key Exchange**: {r.key_exchange_group}")
+                lines.append(f"- **PQ Status**: {r.post_quantum_secure or 'Unknown'}")
+                if r.server_name:
+                    lines.append(f"- **Server Name**: {r.server_name}")
+                if r.certificate_info:
+                    cert = r.certificate_info
+                    lines.append("- **Certificate**:")
+                    if 'subject' in cert:
+                        lines.append(f"  - Subject: {cert['subject']}")
+                    if 'issuer' in cert:
+                        lines.append(f"  - Issuer: {cert['issuer']}")
+                    if 'not_after' in cert:
+                        lines.append(f"  - Expires: {cert['not_after']}")
+                if hasattr(r, 'extras') and r.extras:
+                    if 'ssh_banner' in r.extras:
+                        lines.append(f"- **SSH Banner**: {r.extras['ssh_banner']}")
+                    if 'ssh_kex_algorithms' in r.extras:
+                        kex_list = r.extras['ssh_kex_algorithms'][:5]  # First 5
+                        lines.append(f"- **SSH KEX Algorithms**: {', '.join(kex_list)}")
+                if r.probe_duration_ms is not None:
+                    lines.append(f"- **Probe Duration**: {r.probe_duration_ms:.2f}ms")
+                lines.append("")
+
+        # Closed ports (compact)
+        if closed_results:
+            closed_ports = sorted([r.target_port for r in closed_results])
+            lines.append("#### Closed Ports")
+            lines.append("")
+            lines.append(f"{', '.join(map(str, closed_ports))}")
+            lines.append("")
+
+        # Other results (timeout, filtered, error)
+        if other_results:
+            lines.append("#### Other")
+            lines.append("")
+            lines.append("| Port | Status | Error |")
+            lines.append("|------|--------|-------|")
+            for r in sorted(other_results, key=lambda x: x.target_port):
+                error_msg = r.error_message or ""
+                lines.append(f"| {r.target_port} | {r.status.value} | {error_msg} |")
+            lines.append("")
+
+        lines.append("---")
+        lines.append("")
 
     # Footer
     lines.append("---")
