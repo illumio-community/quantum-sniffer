@@ -64,13 +64,17 @@ TLS_NAMED_GROUPS = {
     29: "x25519", 30: "x448",
     256: "ffdhe2048", 257: "ffdhe3072", 258: "ffdhe4096",
     259: "ffdhe6144", 260: "ffdhe8192",
-    0x0200: "kyber512",   0x0201: "kyber768",   0x0202: "kyber1024",
-    0x11eb: "x25519kyber512",
-    0x11ec: "x25519kyber768",
-    0x6399: "x25519kyber768",
-    0x639a: "x25519mlkem768",
-    0x11ee: "x25519mlkem768",
-    0x768:  "mlkem768",
+    # Post-quantum / hybrid groups, names as in the IANA "TLS Supported
+    # Groups" registry (checked 2026-10-09).
+    0x0200: "MLKEM512",   0x0201: "MLKEM768",   0x0202: "MLKEM1024",
+    0x11e9: "SecP256r1MLKEM512",
+    0x11ea: "MLKEM512X25519",
+    0x11eb: "SecP256r1MLKEM768",
+    0x11ec: "X25519MLKEM768",
+    0x11ed: "SecP384r1MLKEM1024",
+    0x11ee: "curveSM2MLKEM768",
+    0x6399: "X25519Kyber768Draft00",
+    0x639a: "SecP256r1Kyber768Draft00",
 }
 
 IKE_ENCR = {

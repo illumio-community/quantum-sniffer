@@ -15,13 +15,11 @@ TLS_GROUP_CLASS = {
     29: CLASSICAL, 30: CLASSICAL,
     256: CLASSICAL, 257: CLASSICAL, 258: CLASSICAL,
     259: CLASSICAL, 260: CLASSICAL,
-    0x0200: PQ, 0x0201: PQ, 0x0202: PQ,
-    0x11eb: HYBRID,
-    0x11ec: HYBRID,
-    0x6399: HYBRID,
-    0x639a: HYBRID,
-    0x11ee: HYBRID,
-    0x768:  PQ,
+    0x0200: PQ, 0x0201: PQ, 0x0202: PQ,            # MLKEM512/768/1024
+    0x11e9: HYBRID, 0x11ea: HYBRID,                 # ML-KEM-512 hybrids
+    0x11eb: HYBRID, 0x11ec: HYBRID, 0x11ed: HYBRID,  # SecP256r1/X25519/SecP384r1 MLKEM
+    0x11ee: HYBRID,                                 # curveSM2MLKEM768
+    0x6399: HYBRID, 0x639a: HYBRID,                 # Kyber768 Draft00 (obsolete)
 }
 
 # IKEv2 D-H transform IDs (subset of IKE_DH that we want to classify)

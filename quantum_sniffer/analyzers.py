@@ -11,10 +11,10 @@ from datetime import datetime
 from scapy.layers.dns import DNS
 from scapy.layers.inet import IP, TCP, UDP
 from scapy.layers.inet6 import IPv6
-from scapy.layers.tls.all import TLSClientHello, TLSServerHello
-from scapy.packet import Raw
 
 from . import pq
+from .context import get_ctx
+from .wire import payload_after
 from .constants import (
     BGP_MSG_TYPES,
     DNSSEC_ALGORITHMS,
@@ -26,16 +26,15 @@ from .constants import (
     OPENVPN_OPCODES,
     RADIUS_CODES,
     RDP_PROTOCOLS,
-    TLS_CIPHER_SUITES,
-    TLS_EXTENSIONS,
-    TLS_NAMED_GROUPS,
     TLS_VERSIONS,
     TLS_HEURISTIC_PORTS,
     TOR_PORTS,
     ZRTP_KEY_AGREEMENT,
     ZRTP_MSG_TYPES,
 )
-from .parsers import asn1, ikev2, quic as quic_parser, ssh as ssh_parser, tls_raw
+from .parsers import asn1, ikev2, l7, ssh as ssh_parser, tls_raw
+
+SSH_PORTS = {22, 2222}
 
 
 def _now():
@@ -44,6 +43,20 @@ def _now():
 
 def _ip_layer(pkt):
     return pkt[IP] if pkt.haslayer(IP) else pkt[IPv6]
+
+
+def _l4_payload(pkt):
+    """The complete TCP/UDP payload as bytes.
+
+    Never ``pkt[Raw]``: scapy.all decodes many ports into its own layers
+    (RADIUS on 1812, ESP on 4500, ISAKMP on 500, a Kerberos TCP length header
+    on 88, SMB, NetBIOS, DNS), leaving either no Raw layer or a Raw holding
+    only what follows scapy's header.
+    """
+    for layer in (TCP, UDP):
+        if pkt.haslayer(layer):
+            return payload_after(pkt, layer)
+    return b""
 
 
 def _conn_id(ip, transport):
@@ -61,170 +74,123 @@ def _classify(info):
     return info
 
 
-def analyze_tls_client_hello(pkt):
-    if not pkt.haslayer(TLSClientHello):
+def _hex_ids(suites):
+    return [int(c["value"], 16) for c in suites]
+
+
+def _add_weak_tls_offered(info, cipher_ids, legacy_version, supported_version_ids):
+    """Weak-TLS findings for a ClientHello (what the client OFFERED)."""
+    info.update(l7.classify_weak_tls(cipher_ids, legacy_version, supported_version_ids))
+
+
+def _add_smb_over_quic(info):
+    """ALPN "smb" on QUIC is SMB over QUIC (Windows Server 2022+)."""
+    if "smb" in info.get("alpn_protocols", []):
+        info["smb_transport"] = "quic"
+        info["application"] = "SMB over QUIC"
+
+
+_TLS_FIELDS = ("client_cipher_suites", "cipher_count", "selected_cipher",
+               "server_name", "supported_versions", "supported_groups",
+               "supported_group_ids", "key_share_groups", "key_share_group_ids",
+               "alpn_protocols", "extensions", "fragmented", "ech",
+               "session_resumption")
+
+
+# Protocols whose dedicated port carries TLS from the first byte.
+_TLS_PORT_PROTOCOLS = {
+    853: ("DNS over TLS (DoT)", "DoT"),
+    5671: ("AMQP over TLS", "AMQP/TLS"),
+    5061: ("SIPS (SIP over TLS)", "SIPS"),
+}
+
+
+def analyze_tls(pkt):
+    """TLS ClientHello / ServerHello on any TCP port.
+
+    Reads raw bytes rather than scapy's TLS layer: scapy only decodes TLS on
+    port 443, which silently left DoT (853), IMAPS, POP3S, LDAPS, MQTTS, SIPS
+    and STARTTLS-upgraded sessions unanalyzed. With reassembly in front, the
+    payload is one complete hello even when it spanned several segments.
+    """
+    if not pkt.haslayer(TCP):
         return None
-    ch = pkt[TLSClientHello]
-    ip = _ip_layer(pkt)
+    payload = _l4_payload(pkt)
+    if len(payload) < 9 or payload[0] != 0x16 or payload[1] != 0x03 or payload[5] not in (1, 2):
+        return None
+    parsed = tls_raw.parse_hello_record(payload)
+    if not parsed:
+        return None
     tcp = pkt[TCP]
+    ip = _ip_layer(pkt)
+    client = parsed["hs_type"] == "ClientHello"
+    server_port = tcp.dport if client else tcp.sport
     info = {
         "protocol": "TLS",
-        "type": "TLS ClientHello",
+        "type": f"TLS {parsed['hs_type']}",
         "timestamp": _now(),
         "src_ip": ip.src, "src_port": tcp.sport,
         "dst_ip": ip.dst, "dst_port": tcp.dport,
-        "connection": _conn_id(ip, tcp),
-        "direction": "outbound",
+        "connection": (_conn_id(ip, tcp) if client
+                       else f"{ip.dst}:{tcp.dport} -> {ip.src}:{tcp.sport}"),
+        "direction": "outbound" if client else "inbound",
         "encrypted": True,
     }
-    if hasattr(ch, "version"):
-        info["tls_version"] = TLS_VERSIONS.get(ch.version, f"UNKNOWN_0x{ch.version:04x}")
-        info["tls_version_value"] = f"0x{ch.version:04x}"
-    if hasattr(ch, "ciphers") and ch.ciphers:
-        info["client_cipher_suites"] = [
-            {"name": TLS_CIPHER_SUITES.get(c, f"UNKNOWN_0x{c:04x}"), "value": f"0x{c:04x}"}
-            for c in ch.ciphers
-        ]
-        info["cipher_count"] = len(ch.ciphers)
-    if hasattr(ch, "ext") and ch.ext:
-        extensions = []
-        supported_versions = []
-        supported_groups = []
-        supported_group_ids = []
-        alpn_protocols = []
-        server_name = None
-        for ext in ch.ext:
-            ext_type = getattr(ext, "type", None)
-            extensions.append(TLS_EXTENSIONS.get(ext_type, f"unknown_{ext_type}"))
-            if ext_type == 0 and hasattr(ext, "servernames"):
-                for sn in ext.servernames:
-                    if hasattr(sn, "servername"):
-                        server_name = sn.servername.decode("utf-8", errors="ignore")
-            if ext_type == 43 and hasattr(ext, "versions"):
-                for ver in ext.versions:
-                    supported_versions.append(TLS_VERSIONS.get(ver, f"0x{ver:04x}"))
-            if ext_type == 10 and hasattr(ext, "groups"):
-                for grp in ext.groups:
-                    supported_groups.append(TLS_NAMED_GROUPS.get(grp, f"group_0x{grp:04x}"))
-                    supported_group_ids.append(grp)
-            if ext_type == 16:
-                raw = bytes(ext)
-                if len(raw) > 4:
-                    alpn_protocols = _parse_alpn_blob(raw[4:])
-            if ext_type == 65037:
-                info["ech"] = True
-            if ext_type == 35:
-                info["session_resumption"] = "session_ticket"
-            if ext_type == 41:
-                info["session_resumption"] = "pre_shared_key"
-        info["extensions"] = extensions
-        if server_name:
-            info["server_name"] = server_name
-        if supported_versions:
-            info["supported_versions"] = supported_versions
-        if supported_groups:
-            info["supported_groups"] = supported_groups
-            info["supported_group_ids"] = supported_group_ids
-        if alpn_protocols:
-            info["alpn_protocols"] = alpn_protocols
-            app = _tls_alpn_application(alpn_protocols)
-            if app:
-                info["application"] = app
-    return _classify(info)
+    for k in _TLS_FIELDS:
+        if k in parsed:
+            info[k] = parsed[k]
+    hello_version = parsed.get("hello_version_id")
+    sv_ids = parsed.get("supported_version_ids", [])
+    if client:
+        version = hello_version
+    else:
+        # TLS 1.3 negotiates through supported_versions; legacy_version says 1.2.
+        version = sv_ids[0] if sv_ids else hello_version
+    if version is not None:
+        info["tls_version"] = TLS_VERSIONS.get(version, f"UNKNOWN_0x{version:04x}")
+        info["tls_version_value"] = f"0x{version:04x}"
+    if parsed.get("hello_retry_request"):
+        info["type"] = "TLS HelloRetryRequest"
+        info["hello_retry_request"] = True
+        info["note"] = ("Server asked the client to retry with a different key share "
+                        "(group in supported_groups)")
+    if not client and "key_share" in info.get("extensions", []) and "supported_group_ids" not in info:
+        info["key_share_parse_failed"] = True
+        info["note"] = "TLS key_share extension detected but group parsing failed"
+    if "alpn_protocols" in info:
+        app = _tls_alpn_application(info["alpn_protocols"])
+        if app:
+            info["application"] = app
+    if client:
+        _add_weak_tls_offered(info, _hex_ids(parsed.get("client_cipher_suites", [])),
+                              hello_version, sv_ids)
+    else:
+        sel = parsed.get("selected_cipher")
+        info.update(l7.classify_weak_negotiated(
+            int(sel["value"], 16) if sel else None, version))
 
-
-def _parse_alpn_blob(blob):
-    if len(blob) < 2:
-        return []
-    list_len = struct.unpack(">H", blob[0:2])[0]
-    offset = 2
-    end = min(2 + list_len, len(blob))
-    out = []
-    while offset < end:
-        plen = blob[offset]
-        offset += 1
-        if offset + plen > end:
-            break
-        out.append(blob[offset:offset + plen].decode("utf-8", errors="ignore"))
-        offset += plen
-    return out
-
-
-def analyze_tls_server_hello(pkt):
-    if not pkt.haslayer(TLSServerHello):
-        return None
-    sh = pkt[TLSServerHello]
-    ip = _ip_layer(pkt)
-    tcp = pkt[TCP]
-    info = {
-        "protocol": "TLS",
-        "type": "TLS ServerHello",
-        "timestamp": _now(),
-        "src_ip": ip.src, "src_port": tcp.sport,
-        "dst_ip": ip.dst, "dst_port": tcp.dport,
-        "connection": f"{ip.dst}:{tcp.dport} -> {ip.src}:{tcp.sport}",
-        "direction": "inbound",
-        "encrypted": True,
-    }
-    if hasattr(sh, "version"):
-        info["tls_version"] = TLS_VERSIONS.get(sh.version, f"UNKNOWN_0x{sh.version:04x}")
-        info["tls_version_value"] = f"0x{sh.version:04x}"
-    if hasattr(sh, "cipher"):
-        info["selected_cipher"] = {
-            "name": TLS_CIPHER_SUITES.get(sh.cipher, f"UNKNOWN_0x{sh.cipher:04x}"),
-            "value": f"0x{sh.cipher:04x}",
-        }
-    if hasattr(sh, "ext") and sh.ext:
-        extensions = []
-        supported_groups = []
-        supported_group_ids = []
-        alpn_protocols = []
-        has_key_share = False
-        for ext in sh.ext:
-            ext_type = getattr(ext, "type", None)
-            extensions.append(TLS_EXTENSIONS.get(ext_type, f"unknown_{ext_type}"))
-            if ext_type == 51:
-                has_key_share = True
-                group = getattr(ext, "group", None)
-                if group is None and hasattr(ext, "server_share"):
-                    group = getattr(ext.server_share, "group", None)
-                if group is None:
-                    raw = bytes(ext)
-                    for offset in (0, 2, 4, 6, 8):
-                        if offset + 2 <= len(raw):
-                            candidate = struct.unpack(">H", raw[offset:offset + 2])[0]
-                            if candidate in TLS_NAMED_GROUPS:
-                                group = candidate
-                                break
-                if group is not None:
-                    supported_groups.append(TLS_NAMED_GROUPS.get(group, f"group_0x{group:04x}"))
-                    supported_group_ids.append(group)
-            if ext_type == 16:
-                raw = bytes(ext)
-                if len(raw) > 4:
-                    alpn_protocols = _parse_alpn_blob(raw[4:])
-        info["extensions"] = extensions
-        if supported_groups:
-            info["supported_groups"] = supported_groups
-            info["supported_group_ids"] = supported_group_ids
-        elif has_key_share:
-            info["key_share_parse_failed"] = True
-            info["note"] = "TLS key_share extension detected but group parsing failed"
-        if alpn_protocols:
-            info["alpn_protocols"] = alpn_protocols
-            app = _tls_alpn_application(alpn_protocols)
-            if app:
-                info["application"] = app
+    relabel = _TLS_PORT_PROTOCOLS.get(server_port)
+    if relabel:
+        info["protocol"] = relabel[0]
+        info["type"] = f"{relabel[1]} {info['type']}"
+    elif server_port in TLS_HEURISTIC_PORTS or server_port in TOR_PORTS:
+        info["type"] += f" (port {server_port})"
+        info["heuristic_port"] = server_port
+        if server_port in TOR_PORTS:
+            info["application"] = "Tor (heuristic)"
+            info["note"] = f"TLS detected on Tor port {server_port}"
+        else:
+            info["note"] = f"TLS detected on non-standard port {server_port}"
     return _classify(info)
 
 
 def analyze_ssh_kexinit(pkt):
-    if not pkt.haslayer(TCP) or not pkt.haslayer(Raw):
+    if not pkt.haslayer(TCP) or not _l4_payload(pkt):
         return None
     tcp = pkt[TCP]
-    if tcp.dport != 22 and tcp.sport != 22:
+    if tcp.dport not in SSH_PORTS and tcp.sport not in SSH_PORTS:
         return None
-    payload = bytes(pkt[Raw].load)
+    payload = _l4_payload(pkt)
     if payload.startswith(b"SSH-"):
         return None
     parsed = ssh_parser.parse_kexinit(payload)
@@ -238,7 +204,7 @@ def analyze_ssh_kexinit(pkt):
         "src_ip": ip.src, "src_port": tcp.sport,
         "dst_ip": ip.dst, "dst_port": tcp.dport,
         "connection": _conn_id(ip, tcp),
-        "direction": "outbound" if tcp.dport == 22 else "inbound",
+        "direction": "outbound" if tcp.dport in SSH_PORTS else "inbound",
         "encrypted": True,
     }
     info.update(parsed)
@@ -246,12 +212,12 @@ def analyze_ssh_kexinit(pkt):
 
 
 def analyze_ssh_banner(pkt):
-    if not pkt.haslayer(TCP) or not pkt.haslayer(Raw):
+    if not pkt.haslayer(TCP) or not _l4_payload(pkt):
         return None
     tcp = pkt[TCP]
-    if tcp.dport != 22 and tcp.sport != 22:
+    if tcp.dport not in SSH_PORTS and tcp.sport not in SSH_PORTS:
         return None
-    payload = bytes(pkt[Raw].load)
+    payload = _l4_payload(pkt)
     if not payload.startswith(b"SSH-"):
         return None
     banner = payload.split(b"\r\n")[0].decode("utf-8", errors="ignore")
@@ -263,7 +229,7 @@ def analyze_ssh_banner(pkt):
         "src_ip": ip.src, "src_port": tcp.sport,
         "dst_ip": ip.dst, "dst_port": tcp.dport,
         "connection": _conn_id(ip, tcp),
-        "direction": "outbound" if tcp.dport == 22 else "inbound",
+        "direction": "outbound" if tcp.dport in SSH_PORTS else "inbound",
         "ssh_banner": banner,
         "encrypted": True,
     }
@@ -271,18 +237,23 @@ def analyze_ssh_banner(pkt):
     if len(parts) >= 3:
         info["ssh_protocol_version"] = parts[1]
         info["ssh_software_version"] = "-".join(parts[2:])
+    ssh_version = l7.ssh_version_from_banner(banner)
+    if ssh_version:
+        info["ssh_version"] = ssh_version
+        if ssh_version in ("1", "1.99"):
+            info["note"] = f"SSH protocol {ssh_version}: SSH-1 is broken and deprecated"
     info["post_quantum_secure"] = "Unknown"
     return info
 
 
 def analyze_ipsec_ike(pkt):
-    if not pkt.haslayer(UDP) or not pkt.haslayer(Raw):
+    if not pkt.haslayer(UDP) or not _l4_payload(pkt):
         return None
     udp = pkt[UDP]
     ip = _ip_layer(pkt)
     if udp.dport not in (500, 4500) and udp.sport not in (500, 4500):
         return None
-    raw = bytes(pkt[Raw].load)
+    raw = _l4_payload(pkt)
     if udp.dport == 4500 or udp.sport == 4500:
         if len(raw) < 4:
             return None
@@ -327,15 +298,23 @@ def analyze_ipsec_ike(pkt):
 
 
 def analyze_wireguard(pkt):
-    if not pkt.haslayer(UDP) or not pkt.haslayer(Raw):
+    if not pkt.haslayer(UDP) or not _l4_payload(pkt):
         return None
     udp = pkt[UDP]
     ip = _ip_layer(pkt)
-    raw = bytes(pkt[Raw].load)
+    raw = _l4_payload(pkt)
     if len(raw) < 4:
         return None
     msg_type = raw[0]
     if msg_type not in (1, 2, 3, 4):
+        return None
+    # The type is a little-endian u32: three zero reserved bytes follow it.
+    # Without this check every DHCP request (01 01 06 00) and RADIUS
+    # Access-Request (code 1) matched, and oversized ones were labelled
+    # "possible PQ WireGuard" -> Hybrid.
+    if raw[1:4] != b"\x00\x00\x00":
+        return None
+    if msg_type == 4 and (len(raw) < 32 or (len(raw) - 16) % 16):
         return None
     expected = {1: 148, 2: 92, 3: 64}.get(msg_type)
     pq_suspected = False
@@ -370,11 +349,11 @@ def analyze_wireguard(pkt):
 
 
 def analyze_dtls(pkt):
-    if not pkt.haslayer(UDP) or not pkt.haslayer(Raw):
+    if not pkt.haslayer(UDP) or not _l4_payload(pkt):
         return None
     udp = pkt[UDP]
     ip = _ip_layer(pkt)
-    raw = bytes(pkt[Raw].load)
+    raw = _l4_payload(pkt)
     if len(raw) < 13:
         return None
     content_type = raw[0]
@@ -402,103 +381,78 @@ def analyze_dtls(pkt):
     return info
 
 
+def _wrap_handshake(msg):
+    """Bare TLS handshake message -> a TLS record, for parse_hello_record."""
+    return b"\x16\x03\x03" + struct.pack(">H", len(msg)) + msg
+
+
 def analyze_quic(pkt):
-    if not pkt.haslayer(UDP) or not pkt.haslayer(Raw):
+    """QUIC Initial packets: reassemble and parse the ClientHello (SNI, offered
+    groups) and the ServerHello (the group actually negotiated)."""
+    if not pkt.haslayer(UDP):
         return None
     udp = pkt[UDP]
-    ip = _ip_layer(pkt)
     if udp.dport != 443 and udp.sport != 443:
         return None
-    raw = bytes(pkt[Raw].load)
-    if len(raw) < 7:
+    raw = _l4_payload(pkt)
+    if len(raw) < 7 or not (raw[0] & 0x80) or not (raw[0] & 0x40):
         return None
-    first_byte = raw[0]
-    if not (first_byte & 0x80):
+    from_client = udp.dport == 443
+    ip = _ip_layer(pkt)
+    if from_client:
+        key = (ip.src, udp.sport, ip.dst, udp.dport)
+    else:
+        key = (ip.dst, udp.dport, ip.src, udp.sport)
+    results = get_ctx(pkt).quic.handle(raw, key, from_client)
+    events = [_quic_event(res, ip, udp, key, from_client) for res in results]
+    if not events:
         return None
-    if not (first_byte & 0x40):
-        return None
-    if (first_byte & 0x30) != 0x00:
-        return None
-    if len(raw) < 5:
-        return None
-    version = struct.unpack(">I", raw[1:5])[0]
-    if version not in (0x00000001, 0x6b3343cf):
-        return None
-    offset = 5
-    dcid_len = raw[offset]; offset += 1
-    if offset + dcid_len > len(raw):
-        return None
-    dcid = raw[offset:offset + dcid_len]; offset += dcid_len
-    scid_len = raw[offset]; offset += 1
-    if offset + scid_len > len(raw):
-        return None
-    offset += scid_len
-    token_len, offset = quic_parser.parse_varint(raw, offset)
-    offset += token_len
-    pkt_len, offset = quic_parser.parse_varint(raw, offset)
-    pn_offset = offset
+    return events[0] if len(events) == 1 else events
+
+
+def _quic_event(res, ip, udp, key, from_client):
     info = {
         "protocol": "QUIC",
         "type": "QUIC Initial",
         "timestamp": _now(),
         "src_ip": ip.src, "src_port": udp.sport,
         "dst_ip": ip.dst, "dst_port": udp.dport,
-        "connection": _conn_id(ip, udp),
-        "direction": "outbound" if udp.dport == 443 else "inbound",
+        "connection": f"{key[0]}:{key[1]} -> {key[2]}:{key[3]}",
+        "direction": "outbound" if from_client else "inbound",
         "encrypted": True,
-        "quic_version": f"0x{version:08x}",
-        "quic_dcid": dcid.hex(),
+        "quic_version": f"0x{res['version']:08x}",
+        "quic_dcid": res["odcid"],
         "note": "QUIC carries TLS 1.3 internally",
     }
-    if quic_parser.CRYPTO_AVAILABLE and dcid_len > 0 and pkt_len > 4:
-        try:
-            key, iv, hp = quic_parser.derive_initial_keys(dcid, version)
-            if pn_offset + pkt_len > len(raw):
-                raise ValueError("packet length exceeds buffer")
-            packet_payload = raw[pn_offset:pn_offset + pkt_len]
-            if len(packet_payload) < 20:
-                raise ValueError("packet too short for decryption")
-            raw_header_with_pn = bytearray(raw[:pn_offset + 4])
-            unprotected_header, pn_len = quic_parser.remove_header_protection(
-                raw_header_with_pn, packet_payload, hp
-            )
-            if unprotected_header and pn_len > 0:
-                pn_bytes = unprotected_header[-pn_len:]
-                packet_number = int.from_bytes(pn_bytes, "big")
-                aad = unprotected_header[:pn_offset + pn_len]
-                encrypted_payload = packet_payload[pn_len:]
-                plaintext = quic_parser.decrypt_payload(
-                    key, iv, packet_number, encrypted_payload, aad
-                )
-                if plaintext:
-                    handshake = quic_parser.extract_tls_clienthello(plaintext)
-                    if handshake:
-                        parsed = tls_raw.parse_clienthello_handshake(handshake)
-                        if parsed:
-                            for field in ("supported_groups", "supported_group_ids",
-                                          "alpn_protocols", "server_name", "extensions",
-                                          "ech", "session_resumption"):
-                                if field in parsed:
-                                    info[field] = parsed[field]
-                            info["quic_tls_decrypted"] = True
-        except Exception as exc:
-            info["quic_decrypt_error"] = str(exc)
+    if res["kind"] == "initial":
+        info["quic_decrypt_error"] = res["error"]
+        return _classify(info)
+    parsed = tls_raw.parse_hello_record(_wrap_handshake(res["handshake"])) or {}
+    info["quic_tls_decrypted"] = True
+    if res["kind"] == "client_hello":
+        info["type"] = "QUIC ClientHello"
+        for field in ("supported_groups", "supported_group_ids", "alpn_protocols",
+                      "server_name", "extensions", "supported_versions", "ech",
+                      "session_resumption", "client_cipher_suites", "cipher_count",
+                      "key_share_groups", "key_share_group_ids"):
+            if field in parsed:
+                info[field] = parsed[field]
+        _add_weak_tls_offered(info, _hex_ids(parsed.get("client_cipher_suites", [])),
+                              parsed.get("hello_version_id"),
+                              parsed.get("supported_version_ids", []))
+        _add_smb_over_quic(info)
+    else:
+        info["type"] = "QUIC ServerHello"
+        if parsed.get("hello_retry_request"):
+            info["type"] = "QUIC HelloRetryRequest"
+            info["hello_retry_request"] = True
+        for field in ("selected_cipher", "supported_groups", "supported_group_ids",
+                      "extensions", "supported_versions"):
+            if field in parsed:
+                info[field] = parsed[field]
+        sel = parsed.get("selected_cipher")
+        info.update(l7.classify_weak_negotiated(int(sel["value"], 16) if sel else None, None))
     return _classify(info)
-
-
-def analyze_dns_over_tls(pkt):
-    if not pkt.haslayer(TCP):
-        return None
-    tcp = pkt[TCP]
-    if tcp.dport != 853 and tcp.sport != 853:
-        return None
-    if pkt.haslayer(TLSClientHello) or pkt.haslayer(TLSServerHello):
-        info = analyze_tls_client_hello(pkt) or analyze_tls_server_hello(pkt)
-        if info:
-            info["protocol"] = "DNS over TLS (DoT)"
-            info["type"] = f"DoT {info['type']}"
-        return info
-    return None
 
 
 def analyze_dnssec(pkt):
@@ -510,14 +464,15 @@ def analyze_dnssec(pkt):
     if dns.qr != 1:
         return None
     rrsig_algs, dnskey_algs, ds_algs = [], [], []
-    for i in range(dns.ancount + dns.nscount + dns.arcount):
+    ancount, nscount, arcount = dns.ancount or 0, dns.nscount or 0, dns.arcount or 0
+    for i in range(ancount + nscount + arcount):
         try:
-            if i < dns.ancount:
+            if i < ancount:
                 rr = dns.an[i]
-            elif i < dns.ancount + dns.nscount:
-                rr = dns.ns[i - dns.ancount]
+            elif i < ancount + nscount:
+                rr = dns.ns[i - ancount]
             else:
-                rr = dns.ar[i - dns.ancount - dns.nscount]
+                rr = dns.ar[i - ancount - nscount]
             rtype = getattr(rr, "type", 0)
             alg = getattr(rr, "algorithm", None)
             if alg is None:
@@ -559,13 +514,13 @@ _STARTTLS_PORTS = {
 
 
 def analyze_starttls(pkt):
-    if not pkt.haslayer(TCP) or not pkt.haslayer(Raw):
+    if not pkt.haslayer(TCP) or not _l4_payload(pkt):
         return None
     tcp = pkt[TCP]
     if tcp.dport not in _STARTTLS_PORTS and tcp.sport not in _STARTTLS_PORTS:
         return None
     try:
-        text = bytes(pkt[Raw].load).decode("utf-8", errors="ignore").upper()
+        text = _l4_payload(pkt).decode("utf-8", errors="ignore").upper()
     except Exception:
         return None
     if "STARTTLS" not in text:
@@ -587,40 +542,13 @@ def analyze_starttls(pkt):
     return info
 
 
-def analyze_smb(pkt):
-    if not pkt.haslayer(TCP) or not pkt.haslayer(Raw):
-        return None
-    tcp = pkt[TCP]
-    if tcp.dport != 445 and tcp.sport != 445:
-        return None
-    raw = bytes(pkt[Raw].load)
-    if len(raw) < 4 or raw[0:4] not in (b"\xffSMB", b"\xfeSMB"):
-        return None
-    smb_ver = "SMB2/3" if raw[0:4] == b"\xfeSMB" else "SMB1"
-    ip = _ip_layer(pkt)
-    info = {
-        "protocol": "SMB",
-        "type": f"{smb_ver} Negotiate",
-        "timestamp": _now(),
-        "src_ip": ip.src, "src_port": tcp.sport,
-        "dst_ip": ip.dst, "dst_port": tcp.dport,
-        "connection": _conn_id(ip, tcp),
-        "direction": "outbound" if tcp.dport == 445 else "inbound",
-        "encrypted": True,
-        "smb_version": smb_ver,
-        "note": "SMB3 supports AES-128/256 encryption",
-    }
-    info["post_quantum_secure"] = "No"
-    return info
-
-
 def analyze_rdp(pkt):
-    if not pkt.haslayer(TCP) or not pkt.haslayer(Raw):
+    if not pkt.haslayer(TCP) or not _l4_payload(pkt):
         return None
     tcp = pkt[TCP]
     if tcp.dport != 3389 and tcp.sport != 3389:
         return None
-    raw = bytes(pkt[Raw].load)
+    raw = _l4_payload(pkt)
     if len(raw) < 11:
         return None
     if raw[0] != 3 or raw[1] != 0:
@@ -662,14 +590,14 @@ def analyze_rdp(pkt):
 
 
 def analyze_kerberos(pkt):
-    if not (pkt.haslayer(TCP) or pkt.haslayer(UDP)) or not pkt.haslayer(Raw):
+    if not (pkt.haslayer(TCP) or pkt.haslayer(UDP)) or not _l4_payload(pkt):
         return None
     ip = _ip_layer(pkt)
     is_tcp = pkt.haslayer(TCP)
     transport = pkt[TCP] if is_tcp else pkt[UDP]
     if transport.dport != 88 and transport.sport != 88:
         return None
-    raw = bytes(pkt[Raw].load)
+    raw = _l4_payload(pkt)
     data = raw[4:] if is_tcp and len(raw) > 4 else raw
     if len(data) < 2:
         return None
@@ -702,13 +630,13 @@ def analyze_kerberos(pkt):
 
 
 def analyze_snmpv3(pkt):
-    if not pkt.haslayer(UDP) or not pkt.haslayer(Raw):
+    if not pkt.haslayer(UDP) or not _l4_payload(pkt):
         return None
     udp = pkt[UDP]
     ip = _ip_layer(pkt)
     if udp.dport not in (161, 162) and udp.sport not in (161, 162):
         return None
-    raw = bytes(pkt[Raw].load)
+    raw = _l4_payload(pkt)
     if len(raw) < 7 or raw[0] != 0x30:
         return None
     tag, seq_val, _ = asn1.read_tlv(raw, 0)
@@ -754,14 +682,14 @@ def analyze_snmpv3(pkt):
 
 
 def analyze_openvpn(pkt):
-    if not (pkt.haslayer(UDP) or pkt.haslayer(TCP)) or not pkt.haslayer(Raw):
+    if not (pkt.haslayer(UDP) or pkt.haslayer(TCP)) or not _l4_payload(pkt):
         return None
     ip = _ip_layer(pkt)
     is_tcp = pkt.haslayer(TCP)
     transport = pkt[TCP] if is_tcp else pkt[UDP]
     if transport.dport != 1194 and transport.sport != 1194:
         return None
-    raw = bytes(pkt[Raw].load)
+    raw = _l4_payload(pkt)
     if is_tcp:
         if len(raw) < 3:
             return None
@@ -790,13 +718,13 @@ def analyze_openvpn(pkt):
 
 
 def analyze_radius(pkt):
-    if not pkt.haslayer(UDP) or not pkt.haslayer(Raw):
+    if not pkt.haslayer(UDP) or not _l4_payload(pkt):
         return None
     udp = pkt[UDP]
     ip = _ip_layer(pkt)
     if udp.dport not in (1812, 1813) and udp.sport not in (1812, 1813):
         return None
-    raw = bytes(pkt[Raw].load)
+    raw = _l4_payload(pkt)
     if len(raw) < 20:
         return None
     code = raw[0]
@@ -835,20 +763,12 @@ def analyze_radius(pkt):
 
 
 def analyze_amqp(pkt):
-    if not pkt.haslayer(TCP) or not pkt.haslayer(Raw):
+    if not pkt.haslayer(TCP) or not _l4_payload(pkt):
         return None
     tcp = pkt[TCP]
     if tcp.dport not in (5671, 5672) and tcp.sport not in (5671, 5672):
         return None
-    if (tcp.dport == 5671 or tcp.sport == 5671) and (
-        pkt.haslayer(TLSClientHello) or pkt.haslayer(TLSServerHello)
-    ):
-        info = analyze_tls_client_hello(pkt) or analyze_tls_server_hello(pkt)
-        if info:
-            info["protocol"] = "AMQP over TLS"
-            info["type"] = f"AMQP/TLS {info['type']}"
-        return info
-    raw = bytes(pkt[Raw].load)
+    raw = _l4_payload(pkt)
     if len(raw) < 8 or raw[0:4] != b"AMQP":
         return None
     major, minor, revision = raw[5], raw[6], raw[7]
@@ -872,7 +792,7 @@ def analyze_amqp(pkt):
 
 
 def analyze_sip(pkt):
-    if not pkt.haslayer(Raw):
+    if not _l4_payload(pkt):
         return None
     ip = _ip_layer(pkt)
     is_tcp = pkt.haslayer(TCP)
@@ -882,16 +802,8 @@ def analyze_sip(pkt):
     SIP_PORTS = (5060, 5061)
     if transport.dport not in SIP_PORTS and transport.sport not in SIP_PORTS:
         return None
-    if (transport.dport == 5061 or transport.sport == 5061) and (
-        pkt.haslayer(TLSClientHello) or pkt.haslayer(TLSServerHello)
-    ):
-        info = analyze_tls_client_hello(pkt) or analyze_tls_server_hello(pkt)
-        if info:
-            info["protocol"] = "SIPS (SIP over TLS)"
-            info["type"] = f"SIPS {info['type']}"
-        return info
     try:
-        text = bytes(pkt[Raw].load).decode("utf-8", errors="ignore")
+        text = _l4_payload(pkt).decode("utf-8", errors="ignore")
     except Exception:
         return None
     lines = text.split("\r\n")
@@ -932,11 +844,11 @@ def analyze_sip(pkt):
 
 
 def analyze_zrtp(pkt):
-    if not pkt.haslayer(UDP) or not pkt.haslayer(Raw):
+    if not pkt.haslayer(UDP) or not _l4_payload(pkt):
         return None
     udp = pkt[UDP]
     ip = _ip_layer(pkt)
-    raw = bytes(pkt[Raw].load)
+    raw = _l4_payload(pkt)
     if len(raw) < 12:
         return None
     if raw[0] != 0x10 or (raw[1] & 0x80):
@@ -981,13 +893,13 @@ def analyze_zrtp(pkt):
 
 
 def analyze_bgp(pkt):
-    if not pkt.haslayer(TCP) or not pkt.haslayer(Raw):
+    if not pkt.haslayer(TCP) or not _l4_payload(pkt):
         return None
     tcp = pkt[TCP]
     ip = _ip_layer(pkt)
     if tcp.dport != 179 and tcp.sport != 179:
         return None
-    raw = bytes(pkt[Raw].load)
+    raw = _l4_payload(pkt)
     if not raw:
         return None
     direction = "outbound" if tcp.dport == 179 else "inbound"
@@ -1041,7 +953,7 @@ def analyze_bgp(pkt):
 
 
 def analyze_opcua(pkt):
-    if not pkt.haslayer(TCP) or not pkt.haslayer(Raw):
+    if not pkt.haslayer(TCP) or not _l4_payload(pkt):
         return None
     tcp = pkt[TCP]
     ip = _ip_layer(pkt)
@@ -1050,7 +962,7 @@ def analyze_opcua(pkt):
             else None)
     if port is None:
         return None
-    raw = bytes(pkt[Raw].load)
+    raw = _l4_payload(pkt)
     direction = "outbound" if tcp.dport == port else "inbound"
     if port == 4843:
         if len(raw) >= 6 and raw[0] == 0x16 and raw[1] == 0x03 and raw[2] in (0x01, 0x02, 0x03, 0x04):
@@ -1116,57 +1028,8 @@ def analyze_opcua(pkt):
     return info
 
 
-def analyze_tls_heuristic(pkt):
-    """Detect TLS hellos on non-standard ports by raw inspection."""
-    if not pkt.haslayer(TCP) or not pkt.haslayer(Raw):
-        return None
-    tcp = pkt[TCP]
-    candidate_ports = TLS_HEURISTIC_PORTS | TOR_PORTS
-    port = (tcp.dport if tcp.dport in candidate_ports
-            else tcp.sport if tcp.sport in candidate_ports
-            else None)
-    if port is None:
-        return None
-    raw = bytes(pkt[Raw].load)
-    parsed = tls_raw.parse_hello_record(raw)
-    if not parsed:
-        return None
-    ip = _ip_layer(pkt)
-    info = {
-        "protocol": "TLS",
-        "type": f"TLS {parsed['hs_type']} (port {port})",
-        "timestamp": _now(),
-        "src_ip": ip.src, "src_port": tcp.sport,
-        "dst_ip": ip.dst, "dst_port": tcp.dport,
-        "connection": _conn_id(ip, tcp),
-        "direction": "outbound" if tcp.dport == port else "inbound",
-        "encrypted": True,
-        "tls_version": parsed.get("record_version", "Unknown"),
-        "heuristic_port": port,
-        "note": (
-            f"TLS detected on Tor port {port}" if port in TOR_PORTS
-            else f"TLS detected on non-standard port {port}"
-        ),
-    }
-    if port in TOR_PORTS:
-        info["application"] = "Tor (heuristic)"
-    for k in ("client_cipher_suites", "cipher_count", "selected_cipher",
-              "server_name", "supported_versions", "supported_groups",
-              "supported_group_ids", "alpn_protocols", "extensions",
-              "fragmented", "ech", "session_resumption"):
-        if k in parsed:
-            info[k] = parsed[k]
-    if "alpn_protocols" in info:
-        app = _tls_alpn_application(info["alpn_protocols"])
-        if app and "application" not in info:
-            info["application"] = app
-    return _classify(info)
-
-
 ANALYZERS = [
-    analyze_dns_over_tls,
-    analyze_tls_client_hello,
-    analyze_tls_server_hello,
+    analyze_tls,
     analyze_ssh_kexinit,
     analyze_ssh_banner,
     analyze_ipsec_ike,
@@ -1175,7 +1038,6 @@ ANALYZERS = [
     analyze_quic,
     analyze_dnssec,
     analyze_starttls,
-    analyze_smb,
     analyze_rdp,
     analyze_kerberos,
     analyze_snmpv3,
@@ -1186,5 +1048,4 @@ ANALYZERS = [
     analyze_zrtp,
     analyze_bgp,
     analyze_opcua,
-    analyze_tls_heuristic,
 ]

@@ -47,6 +47,9 @@ def load_events(path):
 
 
 def render_report(events, *, show_skull=False):
+    # Cleartext layer-7 events (--l7) carry no key exchange: not sessions a
+    # quantum computer would need to break.
+    events = [e for e in events if e.get("post_quantum_secure") != "N/A"]
     out = [BANNER]
     if show_skull:
         out.append(ASCII_SKULL)

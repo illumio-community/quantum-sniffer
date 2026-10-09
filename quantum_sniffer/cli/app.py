@@ -54,10 +54,13 @@ PLAINTEXT_EXTRA_PORTS = [
 ]
 
 
-def build_default_filter(encrypted_only):
+def build_default_filter(encrypted_only, l7=False):
     parts = list(DEFAULT_PORTS)
     if not encrypted_only:
         parts += PLAINTEXT_EXTRA_PORTS
+    if l7:
+        from ..l7_analyzers import L7_EXTRA_PORTS
+        parts += L7_EXTRA_PORTS
     return " or ".join(parts)
 
 
@@ -259,6 +262,13 @@ Post-quantum classification:
   Hybrid  PQ + classical (transition mode)
   No      classical only — harvest-now-decrypt-later risk
   Unknown cannot determine from observable handshake
+  N/A     cleartext layer-7 event (--l7), no key exchange to classify
+
+Layer 7 (--l7): adds cleartext HTTP requests (method/host/path/user-agent),
+DNS queries/answers with a conformance verdict (is port 53 really carrying
+DNS?), and NetBIOS name/datagram service names. Detection and reporting only.
+Weak-TLS findings, SSH protocol version, SMB dialect/encryption/transport and
+SMB-over-QUIC are reported on every run.
         """,
     )
     parser.add_argument(
@@ -278,6 +288,11 @@ Post-quantum classification:
     parser.add_argument(
         "-a", "--all", action="store_true",
         help="Include unencrypted protocols (default: encrypted only)",
+    )
+    parser.add_argument(
+        "--l7", action="store_true",
+        help="Layer-7 detection: also report cleartext HTTP, DNS (with a "
+             "conformance verdict) and NetBIOS events. Detection only.",
     )
     parser.add_argument(
         "--bpf",
@@ -361,16 +376,18 @@ def main(argv=None):
     if args.bpf:
         bpf = args.bpf
     else:
-        bpf = build_default_filter(encrypted_only)
+        bpf = build_default_filter(encrypted_only, l7=args.l7)
     if args.host:
         bpf = f"({bpf}) and host {args.host}"
 
     writer = DualWriter(output_base)
-    engine = CaptureEngine(writer, encrypted_only=encrypted_only, debug=args.debug, quiet=args.quiet)
+    engine = CaptureEngine(writer, encrypted_only=encrypted_only, debug=args.debug,
+                           quiet=args.quiet, l7=args.l7)
 
     print(f"[*] quantum-sniffer")
     print(f"[*] Output:    {writer.csv_path} + {writer.jsonl_path}")
-    print(f"[*] Mode:      {'encrypted only' if encrypted_only else 'all protocols'}")
+    print(f"[*] Mode:      {'encrypted only' if encrypted_only else 'all protocols'}"
+          f"{' + layer 7' if args.l7 else ''}")
     if args.read:
         print(f"[*] Reading:   {args.read}")
     else:
@@ -417,6 +434,12 @@ def main(argv=None):
         print("\n[*] Post-Quantum:")
         for status in ("Yes", "Hybrid", "No", "Unknown"):
             print(f"    {status:8} {summary['post_quantum'].get(status, 0)}")
+        if summary["post_quantum"].get("N/A"):
+            print(f"    {'N/A':8} {summary['post_quantum']['N/A']}  (cleartext layer-7 events)")
+        if summary["findings"]:
+            print("\n[*] Layer-7 findings:")
+            for f, cnt in summary["findings"].items():
+                print(f"    {f}: {cnt}")
     return 0
 
 

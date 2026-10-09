@@ -12,6 +12,7 @@ PQ_LABEL = {
     "Hybrid":  "HYBRID (PQ + Classical)",
     "No":      "CLASSICAL CRYPTO (quantum-vulnerable)",
     "Unknown": "UNKNOWN",
+    "N/A":     "N/A (cleartext, no key exchange)",
 }
 
 
@@ -24,7 +25,12 @@ class DualWriter:
         "src_ip", "src_port", "dst_ip", "dst_port",
         "connection", "direction", "encrypted",
         "tls_version", "server_name", "selected_cipher_name",
-        "ssh_banner", "application", "note"
+        "ssh_banner", "application", "note",
+        # Layer-7 detections
+        "tls_deprecated_version", "tls_weak_cipher", "tls_weak_offered",
+        "ssh_version", "smb_version", "smb_encrypted", "smb_transport",
+        "netbios_name", "dns_query", "dns_conforming", "dns_nonconformance",
+        "http_method", "http_host", "http_path", "http_user_agent",
     ]
 
     def __init__(self, base_path):
@@ -40,12 +46,19 @@ class DualWriter:
         # Open JSONL file in append mode
         self._jsonl_fh = open(self.jsonl_path, "a", buffering=1)
 
-        # Open CSV file - write header if new file
+        # Open CSV file - write header if new file. When appending to an
+        # existing file, keep ITS header so rows stay aligned with it.
         csv_exists = os.path.exists(self.csv_path) and os.path.getsize(self.csv_path) > 0
+        fieldnames = self.CSV_FIELDS
+        if csv_exists:
+            with open(self.csv_path, newline='') as fh:
+                existing = next(csv.reader(fh), None)
+            if existing:
+                fieldnames = existing
         self._csv_fh = open(self.csv_path, "a", buffering=1, newline='')
         self._csv_writer = csv.DictWriter(
             self._csv_fh,
-            fieldnames=self.CSV_FIELDS,
+            fieldnames=fieldnames,
             extrasaction='ignore'  # Silently drop fields not in CSV_FIELDS
         )
         if not csv_exists:
@@ -63,6 +76,8 @@ class DualWriter:
         # Flatten selected_cipher if present
         if "selected_cipher" in info and isinstance(info["selected_cipher"], dict):
             csv_row["selected_cipher_name"] = info["selected_cipher"].get("name", "")
+        if isinstance(info.get("tls_weak_offered"), list):
+            csv_row["tls_weak_offered"] = ";".join(info["tls_weak_offered"])
 
         self._csv_writer.writerow(csv_row)
 
@@ -199,6 +214,8 @@ def print_info(info, file=sys.stdout):
             else:
                 p(f"{label}: {v}")
 
+    _print_l7(info, p)
+
     if "heuristic_port" in info:
         port = info["heuristic_port"]
         suffix = " (Tor)" if port in TOR_PORTS else ""
@@ -208,3 +225,43 @@ def print_info(info, file=sys.stdout):
         p(f"Note:        {info['note']}")
 
     p("=" * 80)
+
+
+def _print_l7(info, p):
+    """Layer-7 detection lines."""
+    if info.get("tls_deprecated_version") or info.get("tls_weak_cipher"):
+        p(f"** Weak TLS offered: {', '.join(info.get('tls_weak_offered', []))} **")
+    if info.get("tls_deprecated_version_negotiated"):
+        p(f"** Deprecated TLS version NEGOTIATED: {info.get('tls_version', '?')} **")
+    if info.get("tls_weak_cipher_negotiated"):
+        p(f"** Weak cipher NEGOTIATED: {info['tls_weak_cipher_negotiated']} **")
+    if "ssh_version" in info:
+        p(f"SSH Version: {info['ssh_version']}")
+    if "smb_version" in info:
+        p(f"SMB Dialect: {info['smb_version']}")
+    if info.get("smb_encrypted"):
+        p("SMB Encryption: transform header seen (encrypted)")
+    if "smb_transport" in info:
+        p(f"SMB Transport: {info['smb_transport']}")
+    if "netbios_name" in info:
+        suffix = f" <{info['netbios_suffix']}>" if "netbios_suffix" in info else ""
+        p(f"NetBIOS Name: {info['netbios_name']}{suffix}")
+    if "netbios_source_name" in info:
+        p(f"NetBIOS Source: {info['netbios_source_name']}")
+    if "http_method" in info:
+        p(f"HTTP:        {info['http_method']} {info.get('http_path', '')} {info.get('http_version', '')}")
+        if "http_host" in info:
+            p(f"HTTP Host:   {info['http_host']}")
+        if "http_user_agent" in info:
+            p(f"User-Agent:  {info['http_user_agent']}")
+    if "dns_conforming" in info:
+        if info["dns_conforming"]:
+            p("DNS:         conforming")
+        else:
+            p(f"** DNS:      NOT DNS ({info.get('dns_nonconformance', '?')}) **")
+    if "dns_query" in info:
+        p(f"DNS Query:   {info['dns_query']} {info.get('dns_qtype', '')}")
+    if "dns_rcode" in info:
+        p(f"DNS Rcode:   {info['dns_rcode']}")
+    if "dns_answers" in info:
+        p(f"DNS Answers: {', '.join(info['dns_answers'][:8])}")

@@ -20,7 +20,8 @@ class CaptureEngine:
         writer: DualWriter,
         encrypted_only: bool = True,
         debug: bool = False,
-        quiet: bool = False
+        quiet: bool = False,
+        l7: bool = False,
     ):
         """Initialize capture engine.
 
@@ -29,9 +30,10 @@ class CaptureEngine:
             encrypted_only: Skip unencrypted protocols
             debug: Re-raise analyzer exceptions
             quiet: Suppress per-event console output
+            l7: Run the layer-7 analyzers (detection/reporting only)
         """
         self.writer = writer
-        self.analyzer = ProtocolAnalyzer(encrypted_only=encrypted_only, debug=debug)
+        self.analyzer = ProtocolAnalyzer(encrypted_only=encrypted_only, debug=debug, l7=l7)
         self.quiet = quiet
         self.debug = debug
 
@@ -42,16 +44,10 @@ class CaptureEngine:
             pkt: Scapy Packet object
         """
         try:
-            result = self.analyzer.process(pkt)
-            if result:
-                # Convert to dict for output
+            for result in self.analyzer.process_all(pkt):
                 info = result.to_dict()
-
-                # Print to console unless quiet
                 if not self.quiet:
                     print_info(info)
-
-                # Write to output files
                 self.writer.write(info)
 
         except Exception as exc:

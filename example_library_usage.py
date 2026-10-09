@@ -38,9 +38,7 @@ def example_batch_analysis():
     results = []
 
     for pkt in packets:
-        result = analyzer.process(pkt)
-        if result:
-            results.append(result)
+        results.extend(analyzer.process_all(pkt))
 
     # Get summary statistics
     summary = analyzer.summary()
@@ -62,7 +60,7 @@ def example_pq_classification():
     )
 
     # Classify individual cryptographic elements
-    group = classify_tls_group(0x11ec)  # x25519kyber768
+    group = classify_tls_group(0x11ec)  # X25519MLKEM768
     print(f"TLS group 0x11ec: {group}")  # -> 'hybrid'
 
     kex = classify_ssh_kex("sntrup761x25519-sha512@openssh.com")
@@ -98,7 +96,7 @@ def example_handshake_result():
         'encrypted': True,
         'server_name': 'example.com',
         'tls_version': 'TLS 1.3',
-        'supported_groups': ['x25519kyber768', 'x25519'],
+        'supported_groups': ['X25519MLKEM768', 'x25519'],
     }
 
     result = HandshakeResult.from_dict(data)
@@ -131,8 +129,7 @@ def example_custom_source():
 
     # Process packets as they arrive
     for packet in my_packet_source():
-        result = analyzer.process(packet)
-        if result:
+        for result in analyzer.process_all(packet):
             # Do something with the result
             store_in_database(result)
             alert_if_vulnerable(result)

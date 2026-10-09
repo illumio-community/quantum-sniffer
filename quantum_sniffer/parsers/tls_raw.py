@@ -10,15 +10,37 @@ import struct
 from ..constants import TLS_CIPHER_SUITES, TLS_EXTENSIONS, TLS_NAMED_GROUPS, TLS_VERSIONS
 
 
-def parse_extensions(data, pos, end):
-    """Parse TLS extensions block. Returns dict with parsed fields."""
+# RFC 8446 §4.1.3: a ServerHello with this random is a HelloRetryRequest.
+HRR_RANDOM = bytes.fromhex(
+    "cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c")
+
+
+def _is_grease(v):
+    return (v >> 8) == (v & 0xFF) and (v & 0x0F) == 0x0A
+
+
+def _group_name(gid):
+    if _is_grease(gid):
+        return f"GREASE(0x{gid:04x})"
+    return TLS_NAMED_GROUPS.get(gid, f"group_0x{gid:04x}")
+
+
+def parse_extensions(data, pos, end, hs_type=0x01):
+    """Parse TLS extensions block. Returns dict with parsed fields.
+
+    ``hs_type`` (1 ClientHello, 2 ServerHello) decides how key_share is read:
+    a ClientHello carries a list of shares, a ServerHello exactly one (or, in
+    a HelloRetryRequest, just the selected group).
+    """
     result = {}
     ext_names = []
     server_name = None
     supported_groups = []
     supported_group_ids = []
     supported_versions = []
+    supported_version_ids = []
     alpn_protocols = []
+    key_share_group_ids = []
     has_ech = False
     has_session_ticket = False
     has_pre_shared_key = False
@@ -43,7 +65,7 @@ def parse_extensions(data, pos, end):
                 for gi in range(2, 2 + gl, 2):
                     if gi + 2 <= len(ext_data):
                         gid = struct.unpack(">H", ext_data[gi:gi + 2])[0]
-                        supported_groups.append(TLS_NAMED_GROUPS.get(gid, f"group_0x{gid:04x}"))
+                        supported_groups.append(_group_name(gid))
                         supported_group_ids.append(gid)
 
         elif ext_type == 43 and ext_data:
@@ -52,9 +74,11 @@ def parse_extensions(data, pos, end):
                     if vi + 2 <= len(ext_data):
                         ver = struct.unpack(">H", ext_data[vi:vi + 2])[0]
                         supported_versions.append(TLS_VERSIONS.get(ver, f"0x{ver:04x}"))
+                        supported_version_ids.append(ver)
             elif len(ext_data) >= 2:
                 ver = struct.unpack(">H", ext_data[0:2])[0]
                 supported_versions.append(TLS_VERSIONS.get(ver, f"0x{ver:04x}"))
+                supported_version_ids.append(ver)
 
         elif ext_type == 16 and len(ext_data) >= 2:
             list_len = struct.unpack(">H", ext_data[0:2])[0]
@@ -69,15 +93,20 @@ def parse_extensions(data, pos, end):
                 off += plen
 
         elif ext_type == 51 and len(ext_data) >= 2:
-            # ServerHello key_share is selected_group(2) + key_exchange_len(2) + ...
-            gid = struct.unpack(">H", ext_data[0:2])[0]
-            # Heuristic: in ClientHello key_share starts with client_shares_len(2),
-            # in which case ext_data[0:2] won't be a valid group ID. Only record
-            # when it matches a known group.
-            if gid in TLS_NAMED_GROUPS or 0x0100 <= gid <= 0x6500:
-                if not supported_group_ids:  # don't duplicate if supported_groups already present
-                    supported_groups.append(TLS_NAMED_GROUPS.get(gid, f"group_0x{gid:04x}"))
-                    supported_group_ids.append(gid)
+            if hs_type == 0x01:
+                # ClientHello: client_shares_len(2) + {group(2) len(2) key}*
+                lim = min(2 + struct.unpack(">H", ext_data[0:2])[0], len(ext_data))
+                ko = 2
+                while ko + 4 <= lim:
+                    gid, klen = struct.unpack(">HH", ext_data[ko:ko + 4])
+                    key_share_group_ids.append(gid)
+                    ko += 4 + klen
+            else:
+                # ServerHello: group(2) len(2) key; HelloRetryRequest: group(2).
+                # This is the negotiated group.
+                gid = struct.unpack(">H", ext_data[0:2])[0]
+                supported_groups.append(_group_name(gid))
+                supported_group_ids.append(gid)
 
         elif ext_type == 41:
             has_pre_shared_key = True
@@ -97,8 +126,13 @@ def parse_extensions(data, pos, end):
         result["supported_group_ids"] = supported_group_ids
     if supported_versions:
         result["supported_versions"] = supported_versions
+        result["supported_version_ids"] = supported_version_ids
     if alpn_protocols:
         result["alpn_protocols"] = alpn_protocols
+    if key_share_group_ids:
+        result["key_share_group_ids"] = key_share_group_ids
+        result["key_share_groups"] = [_group_name(g)
+                                      for g in key_share_group_ids]
     if has_ech:
         result["ech"] = True
     if has_session_ticket:
@@ -136,6 +170,9 @@ def parse_hello_record(data):
     }
     if fragmented:
         result["fragmented"] = True
+    result["hello_version_id"] = struct.unpack(">H", body[0:2])[0]
+    if hs_type == 0x02 and body[2:34] == HRR_RANDOM:
+        result["hello_retry_request"] = True
 
     pos = 34  # legacy_version (2) + random (32)
 
@@ -174,7 +211,7 @@ def parse_hello_record(data):
             ext_len = struct.unpack(">H", body[pos:pos + 2])[0]
             pos += 2
             if pos + ext_len <= len(body):
-                result.update(parse_extensions(body, pos, pos + ext_len))
+                result.update(parse_extensions(body, pos, pos + ext_len, hs_type))
 
     elif hs_type == 0x02:
         if pos >= len(body):
@@ -195,7 +232,7 @@ def parse_hello_record(data):
             ext_len = struct.unpack(">H", body[pos:pos + 2])[0]
             pos += 2
             if pos + ext_len <= len(body):
-                result.update(parse_extensions(body, pos, pos + ext_len))
+                result.update(parse_extensions(body, pos, pos + ext_len, hs_type))
 
     return result
 
@@ -208,7 +245,8 @@ def parse_clienthello_handshake(handshake):
     if len(body) < 34:
         return None
     pos = 34
-    result = {"hs_type": "ClientHello"}
+    result = {"hs_type": "ClientHello",
+              "hello_version_id": struct.unpack(">H", body[0:2])[0]}
     if pos >= len(body):
         return result
     sid_len = body[pos]
@@ -221,6 +259,13 @@ def parse_clienthello_handshake(handshake):
     pos += 2
     if pos + cs_len > len(body):
         return result
+    ciphers = []
+    for i in range(0, cs_len - 1, 2):
+        cs = struct.unpack(">H", body[pos + i:pos + i + 2])[0]
+        ciphers.append({"name": TLS_CIPHER_SUITES.get(cs, f"UNKNOWN_0x{cs:04x}"),
+                        "value": f"0x{cs:04x}"})
+    result["client_cipher_suites"] = ciphers
+    result["cipher_count"] = len(ciphers)
     pos += cs_len
     if pos >= len(body):
         return result
@@ -232,5 +277,5 @@ def parse_clienthello_handshake(handshake):
         ext_len = struct.unpack(">H", body[pos:pos + 2])[0]
         pos += 2
         if pos + ext_len <= len(body):
-            result.update(parse_extensions(body, pos, pos + ext_len))
+            result.update(parse_extensions(body, pos, pos + ext_len, 0x01))
     return result
